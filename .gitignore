@@ -1,5 +1,13 @@
+# Dependencies
 frontend/node_modules
 frontend/package-lock.json
 */__pycache__
+
+# Environment / secrets
 .env
 backend/.env
+*.pem
+*.key
+
+# Claude Code
+.claude/
