@@ -23,7 +23,9 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────
-CHRONICLE_BEARER_TOKEN = os.getenv("CHRONICLE_BEARER_TOKEN")
+_raw_token = os.getenv("CHRONICLE_BEARER_TOKEN", "").strip()
+# Accept token with or without the "Bearer " prefix
+CHRONICLE_BEARER_TOKEN = _raw_token.removeprefix("Bearer ").strip() or None
 CHRONICLE_SOAR_HOST = os.getenv("CHRONICLE_SOAR_HOST", "rb.siemplify-soar.com")
 CHRONICLE_INSTANCE = os.getenv("CHRONICLE_INSTANCE_ID")
 CHRONICLE_REGION = os.getenv("CHRONICLE_REGION", "eu")
@@ -36,6 +38,16 @@ SOAR_BASE = f"{BASE_URL}/v1alpha/projects/{CHRONICLE_PROJECT_ID}/locations/{CHRO
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("codsec")
+
+# ── Startup validation ────────────────────────────────────────────────
+_has_sa = bool(os.getenv("CHRONICLE_SA_FILE") and os.path.exists(os.getenv("CHRONICLE_SA_FILE", "")))
+if not CHRONICLE_BEARER_TOKEN and not _has_sa:
+    logger.warning(
+        "CHRONICLE_BEARER_TOKEN is not set in .env — all API calls will fail. "
+        "Add CHRONICLE_BEARER_TOKEN=<token> (with or without the 'Bearer ' prefix)."
+    )
+elif CHRONICLE_BEARER_TOKEN:
+    logger.info(f"Chronicle auth: bearer token loaded")
 
 
 # ── HTTP Client ───────────────────────────────────────────────────────
@@ -57,7 +69,10 @@ async def chronicle_request(
         auth_headers = get_auth_headers()
         headers.update(auth_headers)
     else:
-        raise HTTPException(status_code=500, detail="No Chronicle credentials configured. Set CHRONICLE_BEARER_TOKEN in .env")
+        raise HTTPException(
+            status_code=500,
+            detail="No Chronicle credentials configured. Set CHRONICLE_BEARER_TOKEN in .env (with or without the 'Bearer ' prefix).",
+        )
 
     headers["Content-Type"] = "application/json"
 
@@ -69,9 +84,33 @@ async def chronicle_request(
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"Chronicle API error: {e.response.status_code} — {e.response.text}")
+            status_code = e.response.status_code
+            response_messsage = e.response.text
+
+            logger.error(f"Chronicle API error: {status_code} — {response_messsage}")
+            
+            if status_code == 400:
+                try:
+                    body = e.response.json()
+                    api_detail = body.get("details") or body.get("title") or e.response.text
+                except Exception:
+                    api_detail = e.response.text
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Chronicle API bad request: {api_detail}",
+                )
+            if status_code == 401:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Chronicle API rejected the token (401 Unauthorized). Check that CHRONICLE_BEARER_TOKEN in .env is valid and not expired.",
+                )
+            if status_code == 403:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Chronicle API denied access (403 Forbidden). The token may lack the required permissions.",
+                )
             raise HTTPException(
-                status_code=e.response.status_code,
+                status_code=status_code,
                 detail=f"Chronicle API error: {e.response.text}",
             )
         except httpx.RequestError as e:
@@ -121,7 +160,7 @@ async def get_playbooks():
     Chronicle SOAR API: GET /playbooks
     """
     url = f"{SOAR_BASE}/legacyPlaybooks:legacyGetWorkflowMenuCardsWithEnvFilter"
-    data = await chronicle_request("POST", url, params={"format": "camel"})
+    data = await chronicle_request("POST", url, params={"format": "camel"}, json_body={})
 
     playbooks = []
     for pb in data.get("workflowMenuCards", data.get("playbooks", [])):
