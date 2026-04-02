@@ -39,6 +39,12 @@ async function apiFetch(endpoint, params = {}) {
 
 const api = {
   health: () => apiFetch("/api/health"),
+  connect: (body) => fetch(`${API_BASE}/api/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(async r => { if (!r.ok) { const e = await r.json().catch(() => ({ detail: r.statusText })); throw new Error(e.detail || `Error ${r.status}`); } return r.json(); }),
+  disconnect: () => fetch(`${API_BASE}/api/disconnect`, { method: "POST" }).then(r => r.json()),
   overview: () => apiFetch("/api/overview"),
   playbooks: () => apiFetch("/api/playbooks"),
   playbookRuns: (id, days) => apiFetch(`/api/playbooks/${id}/runs`, { days }),
@@ -218,9 +224,114 @@ const TABS = [
   { id: "findings", label: "Findings", icon: AlertTriangle },
 ];
 
+// ── Connect Screen ───────────────────────────────────────────────────
+
+function ConnectScreen({ onConnected }) {
+  const [form, setForm] = useState({
+    host: "rb.siemplify-soar.com",
+    project_id: "",
+    region: "eu",
+    instance_id: "",
+    bearer_token: "",
+  });
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState("");
+
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+
+  const handleConnect = async () => {
+    const missing = ["host","project_id","region","instance_id","bearer_token"].filter(k => !form[k].trim());
+    if (missing.length) { setError("All fields are required."); return; }
+    setConnecting(true); setError("");
+    try {
+      await api.connect(form);
+      onConnected();
+    } catch (e) {
+      setError(e.message || "Connection failed.");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const inp = {
+    width: "100%", background: "rgba(255,255,255,0.04)",
+    border: `1px solid ${theme.border}`, borderRadius: 10,
+    padding: "11px 14px", color: theme.text, fontSize: 13,
+    fontFamily: "inherit", outline: "none",
+    boxSizing: "border-box",
+  };
+
+  const Field = ({ label, name, type = "text", placeholder }) => (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11, color: theme.textMuted,
+        textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 5 }}>{label}</label>
+      <input style={inp} type={type} placeholder={placeholder}
+        value={form[name]} onChange={set(name)}
+        onKeyDown={e => e.key === "Enter" && handleConnect()} />
+    </div>
+  );
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      minHeight: "100vh", background: theme.bg, padding: 24,
+    }}>
+      <div style={{
+        background: theme.bgCard, border: `1px solid ${theme.border}`,
+        borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 460,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+          <CodSecLogo size={40} />
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700,
+              background: theme.gradientText, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+              CODSEC
+            </div>
+            <div style={{ fontSize: 12, color: theme.textMuted }}>SOAR Evaluator</div>
+          </div>
+        </div>
+
+        <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Connect to Chronicle</h2>
+        <p style={{ fontSize: 13, color: theme.textDim, marginBottom: 24, lineHeight: 1.6 }}>
+          Enter your Google SecOps SOAR instance details to load the dashboard.
+        </p>
+
+        <Field label="SOAR Host" name="host" placeholder="rb.siemplify-soar.com" />
+        <Field label="Project ID" name="project_id" placeholder="806183131932" />
+        <Field label="Region" name="region" placeholder="eu" />
+        <Field label="Instance ID" name="instance_id" placeholder="88c7bc29-b1c1-4dbf-b50a-..." />
+        <Field label="Bearer Token" name="bearer_token" type="password" placeholder="eyJhbGci..." />
+
+        {error && (
+          <div style={{
+            background: theme.redDim, border: `1px solid ${theme.red}44`,
+            borderRadius: 10, padding: "10px 14px", color: theme.red,
+            fontSize: 13, marginBottom: 16,
+          }}>{error}</div>
+        )}
+
+        <button onClick={handleConnect} disabled={connecting} style={{
+          width: "100%", padding: "13px",
+          background: connecting ? theme.border : theme.accent,
+          color: "#fff", border: "none", borderRadius: 12,
+          fontWeight: 700, fontSize: 14, cursor: connecting ? "default" : "pointer",
+          transition: "background 0.15s",
+        }}>
+          {connecting ? "Connecting…" : "Connect & Load Dashboard"}
+        </button>
+
+        <p style={{ fontSize: 11, color: theme.textMuted, textAlign: "center", marginTop: 14 }}>
+          Credentials are stored in memory only — never written to disk.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ─────────────────────────────────────────────────────────
 
 export default function App() {
+  const [connected, setConnected] = useState(false);
   const [tab, setTab] = useState("overview");
   const [data, setData] = useState({});
   const [loading, setLoading] = useState({});
@@ -239,7 +350,7 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
+  const loadAll = useCallback(() => {
     fetchData("overview", api.overview);
     fetchData("playbooks", api.playbooks);
     fetchData("integrations", api.integrations);
@@ -248,17 +359,28 @@ export default function App() {
     fetchData("trends", () => api.caseTrends(180));
   }, [fetchData]);
 
-  const refreshAll = () => {
-    fetchData("overview", api.overview);
-    fetchData("playbooks", api.playbooks);
-    fetchData("integrations", api.integrations);
-    fetchData("findings", api.findings);
-    fetchData("cases", () => api.cases(30));
-    fetchData("trends", () => api.caseTrends(180));
+  useEffect(() => {
+    // Check if .env credentials are already configured on load
+    api.health().then(h => {
+      if (h.connected) { setConnected(true); loadAll(); }
+    }).catch(() => {});
+  }, [loadAll]);
+
+  const handleConnected = () => { setConnected(true); loadAll(); };
+
+  const handleDisconnect = async () => {
+    await api.disconnect().catch(() => {});
+    setConnected(false);
+    setData({});
+    setErrors({});
   };
+
+  const refreshAll = loadAll;
 
   const ov = data.overview || {};
   const anyLoading = Object.values(loading).some(Boolean);
+
+  if (!connected) return <ConnectScreen onConnected={handleConnected} />;
 
   return (
     <div style={{
@@ -285,14 +407,23 @@ export default function App() {
             </div>
           </div>
         </div>
-        <button onClick={refreshAll} style={{
-          display: "flex", alignItems: "center", gap: 6, background: "transparent",
-          border: `1px solid ${theme.border}`, borderRadius: 10, padding: "8px 16px",
-          color: theme.textDim, cursor: "pointer", fontSize: 12, fontWeight: 500,
-        }}>
-          <RefreshCw size={14} className={anyLoading ? "spinning" : ""} />
-          Refresh
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={refreshAll} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "transparent",
+            border: `1px solid ${theme.border}`, borderRadius: 10, padding: "8px 16px",
+            color: theme.textDim, cursor: "pointer", fontSize: 12, fontWeight: 500,
+          }}>
+            <RefreshCw size={14} className={anyLoading ? "spinning" : ""} />
+            Refresh
+          </button>
+          <button onClick={handleDisconnect} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "transparent",
+            border: `1px solid ${theme.borderLight}`, borderRadius: 10, padding: "8px 16px",
+            color: theme.textMuted, cursor: "pointer", fontSize: 12, fontWeight: 500,
+          }}>
+            Disconnect
+          </button>
+        </div>
       </header>
 
       {/* ── Tabs ── */}

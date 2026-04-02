@@ -19,12 +19,12 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────
 _raw_token = os.getenv("CHRONICLE_BEARER_TOKEN", "").strip()
-# Accept token with or without the "Bearer " prefix
 CHRONICLE_BEARER_TOKEN = _raw_token.removeprefix("Bearer ").strip() or None
 CHRONICLE_SOAR_HOST = os.getenv("CHRONICLE_SOAR_HOST", "rb.siemplify-soar.com")
 CHRONICLE_INSTANCE = os.getenv("CHRONICLE_INSTANCE_ID")
@@ -32,22 +32,32 @@ CHRONICLE_REGION = os.getenv("CHRONICLE_REGION", "eu")
 CHRONICLE_PROJECT_ID = os.getenv("CHRONICLE_PROJECT_ID")
 CHRONICLE_SA_FILE = os.getenv("CHRONICLE_SA_FILE")
 
-# Base URLs for Chronicle Security Operations (SOAR) API
-BASE_URL = f"https://{CHRONICLE_SOAR_HOST}"
-SOAR_BASE = f"{BASE_URL}/v1alpha/projects/{CHRONICLE_PROJECT_ID}/locations/{CHRONICLE_REGION}/instances/{CHRONICLE_INSTANCE}"
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("codsec")
+
+# ── Runtime credentials (overrides .env when set via /api/connect) ────
+_runtime: dict = {}
+
+def _get_token() -> Optional[str]:
+    return _runtime.get("token") or CHRONICLE_BEARER_TOKEN
+
+def _get_soar_base() -> str:
+    if _runtime.get("soar_base"):
+        return _runtime["soar_base"]
+    return (
+        f"https://{CHRONICLE_SOAR_HOST}/v1alpha/projects/{CHRONICLE_PROJECT_ID}"
+        f"/locations/{CHRONICLE_REGION}/instances/{CHRONICLE_INSTANCE}"
+    )
 
 # ── Startup validation ────────────────────────────────────────────────
 _has_sa = bool(os.getenv("CHRONICLE_SA_FILE") and os.path.exists(os.getenv("CHRONICLE_SA_FILE", "")))
 if not CHRONICLE_BEARER_TOKEN and not _has_sa:
     logger.warning(
-        "CHRONICLE_BEARER_TOKEN is not set in .env — all API calls will fail. "
-        "Add CHRONICLE_BEARER_TOKEN=<token> (with or without the 'Bearer ' prefix)."
+        "CHRONICLE_BEARER_TOKEN is not set in .env and no runtime credentials yet. "
+        "Use the connect screen to provide credentials at runtime."
     )
-elif CHRONICLE_BEARER_TOKEN:
-    logger.info(f"Chronicle auth: bearer token loaded")
+else:
+    logger.info("Chronicle auth: .env credentials loaded")
 
 
 # ── HTTP Client ───────────────────────────────────────────────────────
@@ -63,15 +73,16 @@ async def chronicle_request(
     headers = {}
     merged_params = dict(params or {})
 
-    if CHRONICLE_BEARER_TOKEN:
-        headers["Authorization"] = f"Bearer {CHRONICLE_BEARER_TOKEN}"
+    token = _get_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     elif CHRONICLE_SA_FILE and os.path.exists(CHRONICLE_SA_FILE):
         auth_headers = get_auth_headers()
         headers.update(auth_headers)
     else:
         raise HTTPException(
-            status_code=500,
-            detail="No Chronicle credentials configured. Set CHRONICLE_BEARER_TOKEN in .env (with or without the 'Bearer ' prefix).",
+            status_code=401,
+            detail="No Chronicle credentials configured. Use the connect screen to provide your credentials.",
         )
 
     headers["Content-Type"] = "application/json"
@@ -169,15 +180,74 @@ app.add_middleware(
 @app.get("/api/health")
 async def health():
     """Verify backend is running and credentials are configured."""
-    has_token = bool(CHRONICLE_BEARER_TOKEN)
+    has_token = bool(_get_token())
     has_sa = bool(CHRONICLE_SA_FILE and os.path.exists(CHRONICLE_SA_FILE or ""))
+    connected = bool(_runtime.get("token") or CHRONICLE_BEARER_TOKEN or has_sa)
     return {
         "status": "ok",
-        "auth_method": "bearer_token" if has_token else "service_account" if has_sa else "none",
-        "host": CHRONICLE_SOAR_HOST,
-        "instance": CHRONICLE_INSTANCE,
-        "region": CHRONICLE_REGION,
+        "connected": connected,
+        "auth_method": "runtime" if _runtime.get("token") else "bearer_token" if has_token else "service_account" if has_sa else "none",
+        "host": _runtime.get("host") or CHRONICLE_SOAR_HOST,
+        "instance": _runtime.get("instance") or CHRONICLE_INSTANCE,
+        "region": _runtime.get("region") or CHRONICLE_REGION,
     }
+
+
+# ── Connect / Disconnect ──────────────────────────────────────────────
+
+class ConnectRequest(BaseModel):
+    host: str
+    project_id: str
+    region: str
+    instance_id: str
+    bearer_token: str
+
+
+@app.post("/api/connect")
+async def connect(req: ConnectRequest):
+    """
+    Accept runtime credentials from the connect screen.
+    Validates them against the Chronicle health endpoint, then stores in memory.
+    """
+    token = req.bearer_token.strip().removeprefix("Bearer ").strip()
+    soar_base = (
+        f"https://{req.host}/v1alpha/projects/{req.project_id}"
+        f"/locations/{req.region}/instances/{req.instance_id}"
+    )
+
+    # Validate by calling the playbooks endpoint with a small page size
+    test_url = f"{soar_base}/playbooks"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.get(test_url, headers=headers, params={"pageSize": 1})
+            if resp.status_code == 401:
+                raise HTTPException(status_code=401, detail="Invalid token — Chronicle rejected the credentials.")
+            if resp.status_code == 403:
+                raise HTTPException(status_code=403, detail="Token lacks required permissions (403 Forbidden).")
+            if resp.status_code not in (200, 400):
+                raise HTTPException(status_code=resp.status_code, detail=f"Chronicle returned {resp.status_code}: {resp.text[:200]}")
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"Could not reach Chronicle: {str(e)}")
+
+    # Store runtime credentials
+    _runtime["token"] = token
+    _runtime["host"] = req.host
+    _runtime["project_id"] = req.project_id
+    _runtime["region"] = req.region
+    _runtime["instance"] = req.instance_id
+    _runtime["soar_base"] = soar_base
+
+    logger.info(f"Runtime credentials set for host={req.host} instance={req.instance_id}")
+    return {"status": "connected", "host": req.host, "instance": req.instance_id}
+
+
+@app.post("/api/disconnect")
+async def disconnect():
+    """Clear runtime credentials."""
+    _runtime.clear()
+    logger.info("Runtime credentials cleared")
+    return {"status": "disconnected"}
 
 
 # ── Playbooks ─────────────────────────────────────────────────────────
@@ -201,14 +271,14 @@ async def get_playbooks():
 
     # Primary: new-style v1alpha playbooks list
     try:
-        url = f"{SOAR_BASE}/playbooks"
+        url = f"{_get_soar_base()}/playbooks"
         playbooks_raw = await chronicle_paginated_fetch(url, {"pageSize": 1000}, result_key="playbooks")
         logger.info(f"Fetched {len(playbooks_raw)} playbooks via GET /playbooks")
     except HTTPException as e:
         logger.warning(f"GET /playbooks failed ({e.status_code}), trying legacy endpoint")
 
         # Fallback: legacy endpoint without format param
-        url = f"{SOAR_BASE}/legacyPlaybooks:legacyGetWorkflowMenuCardsWithEnvFilter"
+        url = f"{_get_soar_base()}/legacyPlaybooks:legacyGetWorkflowMenuCardsWithEnvFilter"
         data = await chronicle_request("POST", url, json_body={})
         playbooks_raw = data.get("workflowMenuCards", data.get("playbooks", []))
         logger.info(f"Fetched {len(playbooks_raw)} playbooks via legacy endpoint")
@@ -237,7 +307,7 @@ async def get_playbook_runs(
     """
     Fetch execution history for a specific playbook.
     """
-    url = f"{SOAR_BASE}/playbooks/{playbook_id}/executions"
+    url = f"{_get_soar_base()}/playbooks/{playbook_id}/executions"
     start_time = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
     params = {"filter": f'create_time>"{start_time}"', "pageSize": 1000}
 
@@ -290,7 +360,7 @@ async def get_cases(
     """
     Fetch cases from Chronicle SOAR with optional filters.
     """
-    url = f"{SOAR_BASE}/cases"
+    url = f"{_get_soar_base()}/cases"
     start_iso = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     filter_parts = [f'createTime > "{start_iso}"']
@@ -354,7 +424,7 @@ async def get_case_trends(
     """
     Aggregate case volume by week/month for trend analysis.
     """
-    url = f"{SOAR_BASE}/cases"
+    url = f"{_get_soar_base()}/cases"
     start_iso = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {"pageSize": 1000, "filter": f'createTime > "{start_iso}"'}
     cases = await chronicle_paginated_fetch(url, params, result_key="cases")
@@ -388,7 +458,7 @@ async def get_integrations():
     Fetch configured integrations and their health status.
     Chronicle SOAR tracks connectors/integrations.
     """
-    url = f"{SOAR_BASE}/integrations"
+    url = f"{_get_soar_base()}/integrations"
     data = await chronicle_request("GET", url, params={
         "format": "camel",
         "filter": "(internal != true) and (type = 'RESPONSE')",
