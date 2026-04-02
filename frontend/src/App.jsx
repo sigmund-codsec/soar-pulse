@@ -228,20 +228,23 @@ const TABS = [
 
 function ConnectScreen({ onConnected }) {
   const [form, setForm] = useState({
-    host: "rb.siemplify-soar.com",
+    host: "",
+    app_key: "",
     project_id: "",
     region: "eu",
     instance_id: "",
-    bearer_token: "",
   });
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState("");
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
   const handleConnect = async () => {
-    const missing = ["host","project_id","region","instance_id","bearer_token"].filter(k => !form[k].trim());
-    if (missing.length) { setError("All fields are required."); return; }
+    if (!form.host.trim() || !form.app_key.trim()) {
+      setError("Instance URL and App Key are required.");
+      return;
+    }
     setConnecting(true); setError("");
     try {
       await api.connect(form);
@@ -257,8 +260,7 @@ function ConnectScreen({ onConnected }) {
     width: "100%", background: "rgba(255,255,255,0.04)",
     border: `1px solid ${theme.border}`, borderRadius: 10,
     padding: "11px 14px", color: theme.text, fontSize: 13,
-    fontFamily: "inherit", outline: "none",
-    boxSizing: "border-box",
+    fontFamily: "inherit", outline: "none", boxSizing: "border-box",
   };
 
   const Field = ({ label, name, type = "text", placeholder }) => (
@@ -296,11 +298,25 @@ function ConnectScreen({ onConnected }) {
           Enter your Google SecOps SOAR instance details to load the dashboard.
         </p>
 
-        <Field label="SOAR Host" name="host" placeholder="rb.siemplify-soar.com" />
-        <Field label="Project ID" name="project_id" placeholder="806183131932" />
-        <Field label="Region" name="region" placeholder="eu" />
-        <Field label="Instance ID" name="instance_id" placeholder="88c7bc29-b1c1-4dbf-b50a-..." />
-        <Field label="Bearer Token" name="bearer_token" type="password" placeholder="eyJhbGci..." />
+        <Field label="Instance URL" name="host" placeholder="https://rb.siemplify-soar.com" />
+        <Field label="App Key" name="app_key" type="password" placeholder="Paste your App Key" />
+
+        <div style={{ marginBottom: 14 }}>
+          <button onClick={() => setShowAdvanced(v => !v)} style={{
+            background: "none", border: "none", color: theme.textMuted,
+            fontSize: 12, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
+          }}>
+            {showAdvanced ? "▾" : "▸"} Advanced (for Cases & Integrations)
+          </button>
+        </div>
+
+        {showAdvanced && (
+          <>
+            <Field label="Project ID" name="project_id" placeholder="806183131932" />
+            <Field label="Region" name="region" placeholder="eu" />
+            <Field label="Instance ID" name="instance_id" placeholder="88c7bc29-b1c1-4dbf-b50a-..." />
+          </>
+        )}
 
         {error && (
           <div style={{
@@ -321,7 +337,7 @@ function ConnectScreen({ onConnected }) {
         </button>
 
         <p style={{ fontSize: 11, color: theme.textMuted, textAlign: "center", marginTop: 14 }}>
-          Credentials are stored in memory only — never written to disk.
+          App Key: Settings → Integrations → API Key · Credentials stored in memory only.
         </p>
       </div>
     </div>

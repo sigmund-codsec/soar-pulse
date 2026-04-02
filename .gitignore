@@ -11,3 +11,6 @@ backend/.env
 
 # Claude Code
 .claude/
+
+# Design docs / specs (local only)
+docs/superpowers/

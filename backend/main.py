@@ -41,6 +41,14 @@ _runtime: dict = {}
 def _get_token() -> Optional[str]:
     return _runtime.get("token") or CHRONICLE_BEARER_TOKEN
 
+def _get_app_key() -> Optional[str]:
+    return _runtime.get("app_key") or os.getenv("CHRONICLE_APP_KEY")
+
+def _get_base_url() -> str:
+    """Base URL for the SOAR host (e.g. https://rb.siemplify-soar.com)."""
+    host = _runtime.get("host") or CHRONICLE_SOAR_HOST
+    return f"https://{host}"
+
 def _get_soar_base() -> str:
     if _runtime.get("soar_base"):
         return _runtime["soar_base"]
@@ -73,8 +81,11 @@ async def chronicle_request(
     headers = {}
     merged_params = dict(params or {})
 
+    app_key = _get_app_key()
     token = _get_token()
-    if token:
+    if app_key:
+        headers["AppKey"] = app_key
+    elif token:
         headers["Authorization"] = f"Bearer {token}"
     elif CHRONICLE_SA_FILE and os.path.exists(CHRONICLE_SA_FILE):
         auth_headers = get_auth_headers()
@@ -197,49 +208,70 @@ async def health():
 
 class ConnectRequest(BaseModel):
     host: str
-    project_id: str
-    region: str
-    instance_id: str
-    bearer_token: str
+    app_key: str
+    # v1alpha fields — optional, only needed for cases/integrations endpoints
+    project_id: Optional[str] = None
+    region: Optional[str] = None
+    instance_id: Optional[str] = None
 
 
 @app.post("/api/connect")
 async def connect(req: ConnectRequest):
     """
     Accept runtime credentials from the connect screen.
-    Validates them against the Chronicle health endpoint, then stores in memory.
+    Validates them against the external playbooks API, then stores in memory.
     """
-    token = req.bearer_token.strip().removeprefix("Bearer ").strip()
-    soar_base = (
-        f"https://{req.host}/v1alpha/projects/{req.project_id}"
-        f"/locations/{req.region}/instances/{req.instance_id}"
-    )
+    host = req.host.strip().rstrip("/")
+    if not host.startswith("http"):
+        host = f"https://{host}"
+    app_key = req.app_key.strip()
 
-    # Validate by calling the playbooks endpoint with a small page size
-    test_url = f"{soar_base}/playbooks"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    # Validate by hitting the external metadata endpoint
+    test_url = f"{host}/api/external/v1/playbooks/GetPlaybooksMetadata"
+    headers = {"AppKey": app_key, "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            resp = await client.get(test_url, headers=headers, params={"pageSize": 1})
+            resp = await client.get(test_url, headers=headers)
             if resp.status_code == 401:
-                raise HTTPException(status_code=401, detail="Invalid token — Chronicle rejected the credentials.")
+                raise HTTPException(status_code=401, detail="Invalid App Key — Chronicle rejected the credentials.")
             if resp.status_code == 403:
-                raise HTTPException(status_code=403, detail="Token lacks required permissions (403 Forbidden).")
-            if resp.status_code not in (200, 400):
+                raise HTTPException(status_code=403, detail="App Key lacks required permissions (403 Forbidden).")
+            if resp.status_code == 404:
+                # Try alternate endpoint
+                resp = await client.get(
+                    f"{host}/api/external/v1/playbooks/GetEnabledWFCards",
+                    headers={**headers,
+                             "Content-Type": "application/json;odata.metadata=minimal;odata.streaming=true",
+                             "accept": "application/json;odata.metadata=minimal;odata.streaming=true"},
+                    content=b'{"caseEnvironment":"","executionScope":0}',
+                )
+                if resp.status_code not in (200, 400, 404):
+                    raise HTTPException(status_code=resp.status_code, detail=f"Chronicle returned {resp.status_code}: {resp.text[:200]}")
+            elif resp.status_code not in (200, 400):
                 raise HTTPException(status_code=resp.status_code, detail=f"Chronicle returned {resp.status_code}: {resp.text[:200]}")
         except httpx.RequestError as e:
             raise HTTPException(status_code=502, detail=f"Could not reach Chronicle: {str(e)}")
 
-    # Store runtime credentials
-    _runtime["token"] = token
-    _runtime["host"] = req.host
-    _runtime["project_id"] = req.project_id
-    _runtime["region"] = req.region
-    _runtime["instance"] = req.instance_id
-    _runtime["soar_base"] = soar_base
+    # Strip https:// for storage — _get_base_url() re-adds it
+    stored_host = host.removeprefix("https://").removeprefix("http://")
 
-    logger.info(f"Runtime credentials set for host={req.host} instance={req.instance_id}")
-    return {"status": "connected", "host": req.host, "instance": req.instance_id}
+    # Store runtime credentials
+    _runtime["app_key"] = app_key
+    _runtime["host"] = stored_host
+    if req.project_id:
+        _runtime["project_id"] = req.project_id
+    if req.region:
+        _runtime["region"] = req.region
+    if req.instance_id:
+        _runtime["instance"] = req.instance_id
+    if req.project_id and req.region and req.instance_id:
+        _runtime["soar_base"] = (
+            f"https://{stored_host}/v1alpha/projects/{req.project_id}"
+            f"/locations/{req.region}/instances/{req.instance_id}"
+        )
+
+    logger.info(f"Runtime credentials set for host={stored_host}")
+    return {"status": "connected", "host": stored_host}
 
 
 @app.post("/api/disconnect")
@@ -254,48 +286,123 @@ async def disconnect():
 
 def _parse_playbook_status(pb: dict) -> str:
     """Normalize playbook status from various API response formats."""
+    if pb.get("isPublished") or pb.get("published"):
+        return "Active"
     if pb.get("state") == "ENABLED" or pb.get("isEnabled") is True:
         return "Active"
-    if pb.get("state") == "DISABLED" or pb.get("isEnabled") is False:
-        return "Disabled"
+    if pb.get("isActive") is True:
+        return "Active"
     return "Disabled"
+
+
+async def _fetch_playbooks_metadata() -> list:
+    """
+    Fetch playbook metadata from the external Siemplify API.
+    Tries multiple endpoint paths in order, matching SOARLens fallback chain.
+    """
+    base = _get_base_url()
+    app_key = _get_app_key()
+    token = _get_token()
+
+    if not app_key and not token:
+        raise HTTPException(status_code=401, detail="No credentials configured.")
+
+    headers = {"Content-Type": "application/json"}
+    if app_key:
+        headers["AppKey"] = app_key
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+
+    get_paths = [
+        "/api/external/v1/playbooks/GetPlaybooksMetadata",
+        "/api/external/v1/playbooks/getPlaybooksMetadata",
+        "/api/external/v1/playbooks/GetPlaybooks",
+        "/api/external/v1/playbooks/GetPlaybooksMetaData",
+        "/api/external/v1/playbooks",
+        "/api/external/v1/workflows/GetPlaybooksMetadata",
+        "/api/external/v1/workflows",
+    ]
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        last_err = None
+
+        for path in get_paths:
+            url = f"{base}{path}"
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 404:
+                    continue
+                if resp.status_code == 401:
+                    raise HTTPException(status_code=401, detail="Invalid credentials (401). Check your App Key.")
+                if resp.status_code == 403:
+                    raise HTTPException(status_code=403, detail="Access denied (403). Check App Key permissions.")
+                resp.raise_for_status()
+                raw = resp.json()
+                if isinstance(raw, list):
+                    logger.info(f"Fetched {len(raw)} playbooks via GET {path}")
+                    return raw
+                for key in ("playbooks", "data", "value", "results"):
+                    if isinstance(raw.get(key), list):
+                        logger.info(f"Fetched {len(raw[key])} playbooks via GET {path} (key={key})")
+                        return raw[key]
+                # If d.results pattern
+                if raw.get("d") and isinstance(raw["d"].get("results"), list):
+                    return raw["d"]["results"]
+                return raw if isinstance(raw, list) else []
+            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                last_err = e
+                continue
+
+        # Fallback: POST GetEnabledWFCards (Playbooks 2.0)
+        try:
+            wf_url = f"{base}/api/external/v1/playbooks/GetEnabledWFCards"
+            resp = await client.post(
+                wf_url,
+                headers={**headers,
+                         "Content-Type": "application/json;odata.metadata=minimal;odata.streaming=true",
+                         "accept": "application/json;odata.metadata=minimal;odata.streaming=true"},
+                content=b'{"caseEnvironment":"","executionScope":0}',
+            )
+            if resp.status_code not in (404,):
+                resp.raise_for_status()
+                raw = resp.json()
+                if isinstance(raw, list):
+                    logger.info(f"Fetched {len(raw)} playbooks via POST GetEnabledWFCards")
+                    return raw
+                if isinstance(raw.get("value"), list):
+                    return raw["value"]
+        except Exception as e:
+            last_err = e
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"Could not fetch playbook metadata — all endpoints failed. Last error: {last_err}",
+    )
+
+
+def _normalise_playbook(pb: dict) -> dict:
+    """Normalise a raw playbook metadata dict to our API shape."""
+    modified = pb.get("modificationTime") or pb.get("lastModified") or pb.get("modifiedTime") or ""
+    identifier = (
+        pb.get("identifier") or pb.get("id") or
+        pb.get("workflowIdentifier") or pb.get("originalPlaybookIdentifier") or ""
+    )
+    return {
+        "id": str(identifier),
+        "name": pb.get("name") or pb.get("playbookName") or pb.get("title") or "Unnamed",
+        "status": _parse_playbook_status(pb),
+        "description": pb.get("description") or "",
+        "createTime": pb.get("creationTime") or pb.get("createTime") or pb.get("createdTime"),
+        "updateTime": modified or None,
+        "category": pb.get("category") or pb.get("playbookType") or pb.get("workflowType") or "General",
+    }
 
 
 @app.get("/api/playbooks")
 async def get_playbooks():
-    """
-    Fetch all playbooks from Chronicle SOAR.
-    Tries the v1alpha playbooks resource first, falls back to the legacy endpoint.
-    """
-    playbooks_raw = []
-
-    # Primary: new-style v1alpha playbooks list
-    try:
-        url = f"{_get_soar_base()}/playbooks"
-        playbooks_raw = await chronicle_paginated_fetch(url, {"pageSize": 1000}, result_key="playbooks")
-        logger.info(f"Fetched {len(playbooks_raw)} playbooks via GET /playbooks")
-    except HTTPException as e:
-        logger.warning(f"GET /playbooks failed ({e.status_code}), trying legacy endpoint")
-
-        # Fallback: legacy endpoint without format param
-        url = f"{_get_soar_base()}/legacyPlaybooks:legacyGetWorkflowMenuCardsWithEnvFilter"
-        data = await chronicle_request("POST", url, json_body={})
-        playbooks_raw = data.get("workflowMenuCards", data.get("playbooks", []))
-        logger.info(f"Fetched {len(playbooks_raw)} playbooks via legacy endpoint")
-
-    playbooks = []
-    for pb in playbooks_raw:
-        name_field = pb.get("name", "")
-        playbooks.append({
-            "id": pb.get("id", name_field).split("/")[-1] if pb.get("id", name_field) else "",
-            "name": pb.get("displayName", pb.get("name", "Unknown")),
-            "status": _parse_playbook_status(pb),
-            "description": pb.get("description", ""),
-            "createTime": pb.get("createTime", pb.get("creationTime")),
-            "updateTime": pb.get("updateTime", pb.get("modificationTime")),
-            "category": pb.get("category", "Uncategorized"),
-        })
-
+    """Fetch all playbooks from Chronicle SOAR via the external API."""
+    playbooks_raw = await _fetch_playbooks_metadata()
+    playbooks = [_normalise_playbook(pb) for pb in playbooks_raw]
     return {"playbooks": playbooks, "total": len(playbooks)}
 
 
