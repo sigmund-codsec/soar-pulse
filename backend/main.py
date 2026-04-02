@@ -118,6 +118,32 @@ async def chronicle_request(
             raise HTTPException(status_code=502, detail=f"Chronicle connection error: {str(e)}")
 
 
+async def chronicle_paginated_fetch(
+    url: str,
+    params: dict,
+    result_key: str,
+    max_pages: int = 20,
+) -> list:
+    """Fetch all pages from a Chronicle API list endpoint."""
+    all_items = []
+    page_token = None
+
+    for _ in range(max_pages):
+        page_params = dict(params)
+        if page_token:
+            page_params["pageToken"] = page_token
+
+        data = await chronicle_request("GET", url, params=page_params)
+        items = data.get(result_key, data.get("data", []))
+        all_items.extend(items)
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return all_items
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────
 
 app = FastAPI(
