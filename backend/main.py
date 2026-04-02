@@ -179,24 +179,48 @@ async def health():
 
 # ── Playbooks ─────────────────────────────────────────────────────────
 
+def _parse_playbook_status(pb: dict) -> str:
+    """Normalize playbook status from various API response formats."""
+    if pb.get("state") == "ENABLED" or pb.get("isEnabled") is True:
+        return "Active"
+    if pb.get("state") == "DISABLED" or pb.get("isEnabled") is False:
+        return "Disabled"
+    return "Disabled"
+
+
 @app.get("/api/playbooks")
 async def get_playbooks():
     """
     Fetch all playbooks from Chronicle SOAR.
-    Chronicle SOAR API: GET /playbooks
+    Tries the v1alpha playbooks resource first, falls back to the legacy endpoint.
     """
-    url = f"{SOAR_BASE}/legacyPlaybooks:legacyGetWorkflowMenuCardsWithEnvFilter"
-    data = await chronicle_request("POST", url, params={"format": "camel"}, json_body={})
+    playbooks_raw = []
+
+    # Primary: new-style v1alpha playbooks list
+    try:
+        url = f"{SOAR_BASE}/playbooks"
+        data = await chronicle_request("GET", url, params={"pageSize": 1000})
+        playbooks_raw = data.get("playbooks", [])
+        logger.info(f"Fetched {len(playbooks_raw)} playbooks via GET /playbooks")
+    except HTTPException as e:
+        logger.warning(f"GET /playbooks failed ({e.status_code}), trying legacy endpoint")
+
+        # Fallback: legacy endpoint without format param
+        url = f"{SOAR_BASE}/legacyPlaybooks:legacyGetWorkflowMenuCardsWithEnvFilter"
+        data = await chronicle_request("POST", url, json_body={})
+        playbooks_raw = data.get("workflowMenuCards", data.get("playbooks", []))
+        logger.info(f"Fetched {len(playbooks_raw)} playbooks via legacy endpoint")
 
     playbooks = []
-    for pb in data.get("workflowMenuCards", data.get("playbooks", [])):
+    for pb in playbooks_raw:
+        name_field = pb.get("name", "")
         playbooks.append({
-            "id": pb.get("id", pb.get("name", "")).split("/")[-1],
-            "name": pb.get("name", pb.get("displayName", "Unknown")),
-            "status": "Active" if pb.get("isEnabled", pb.get("state") == "ENABLED") else "Disabled",
+            "id": pb.get("id", name_field).split("/")[-1] if pb.get("id", name_field) else "",
+            "name": pb.get("displayName", pb.get("name", "Unknown")),
+            "status": _parse_playbook_status(pb),
             "description": pb.get("description", ""),
-            "createTime": pb.get("creationTime", pb.get("createTime")),
-            "updateTime": pb.get("modificationTime", pb.get("updateTime")),
+            "createTime": pb.get("createTime", pb.get("creationTime")),
+            "updateTime": pb.get("updateTime", pb.get("modificationTime")),
             "category": pb.get("category", "Uncategorized"),
         })
 
