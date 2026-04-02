@@ -641,7 +641,7 @@ export default function App() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
                       <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Integration", "Status", "Type", "Version", "Last Heartbeat"].map(h => (
+                        {["Integration", "Status", "Type", "Version", "Last Heartbeat", "Enabled"].map(h => (
                           <th key={h} style={{
                             textAlign: "left", padding: "12px 14px", color: theme.textMuted,
                             fontWeight: 600, fontSize: 11, textTransform: "uppercase",
@@ -658,6 +658,12 @@ export default function App() {
                           <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>{intg.version || "—"}</td>
                           <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>
                             {intg.lastHeartbeat ? new Date(intg.lastHeartbeat).toLocaleString() : "—"}
+                          </td>
+                          <td style={{ padding: "14px", fontSize: 12 }}>
+                            <span style={{
+                              color: intg.isEnabled ? theme.green : theme.textMuted,
+                              fontWeight: 500,
+                            }}>{intg.isEnabled ? "Yes" : "No"}</span>
                           </td>
                         </tr>
                       ))}

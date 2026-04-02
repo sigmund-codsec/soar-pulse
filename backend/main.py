@@ -480,14 +480,14 @@ async def get_cases(
     Fetch cases from Chronicle SOAR with optional filters.
     """
     url = f"{_get_soar_base()}/cases"
-    start_iso = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
 
-    filter_parts = [f'createTime > "{start_iso}"']
+    filter_parts = [f"createTime gt {start_ms}"]
     if status:
-        filter_parts.append(f'status = "{status}"')
+        filter_parts.append(f"status eq '{status}'")
     if severity:
-        filter_parts.append(f'severity = "{severity}"')
-    filter_str = " AND ".join(filter_parts)
+        filter_parts.append(f"severity eq '{severity}'")
+    filter_str = " and ".join(filter_parts)
 
     params = {"pageSize": page_size, "filter": filter_str}
     cases = await chronicle_paginated_fetch(url, params, result_key="cases")
@@ -544,8 +544,8 @@ async def get_case_trends(
     Aggregate case volume by week/month for trend analysis.
     """
     url = f"{_get_soar_base()}/cases"
-    start_iso = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    params = {"pageSize": 1000, "filter": f'createTime > "{start_iso}"'}
+    start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+    params = {"pageSize": 1000, "filter": f"createTime gt {start_ms}"}
     cases = await chronicle_paginated_fetch(url, params, result_key="cases")
 
     monthly = {}
@@ -571,47 +571,131 @@ async def get_case_trends(
 
 # ── Integrations ──────────────────────────────────────────────────────
 
+def _parse_heartbeat_status(last_heartbeat_raw):
+    """Parse a raw heartbeat value and return (iso_string_or_None, status_string)."""
+    if not last_heartbeat_raw:
+        return None, "Unknown"
+    try:
+        if isinstance(last_heartbeat_raw, (int, float)):
+            hb = datetime.utcfromtimestamp(last_heartbeat_raw / 1000)
+        else:
+            hb = datetime.fromisoformat(str(last_heartbeat_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+        age_min = (datetime.utcnow() - hb).total_seconds() / 60
+        if age_min > 30:
+            status = "Error"
+        elif age_min > 10:
+            status = "Degraded"
+        else:
+            status = "Healthy"
+        return hb.strftime("%Y-%m-%dT%H:%M:%SZ"), status
+    except (ValueError, TypeError):
+        return None, "Unknown"
+
+
+async def _fetch_raw_integrations() -> tuple[list, list]:
+    """
+    Try multiple endpoint paths to fetch integration and connector data.
+    Returns (raw_integrations, raw_connectors).
+    """
+    ext_base = f"{_get_base_url()}/api/external/v1"
+    soar_base = _get_soar_base()
+
+    # Candidate paths for installed integrations (version, display name)
+    intg_paths = [
+        (f"{ext_base}/settings/integrations", {"format": "camel"}),
+        (f"{ext_base}/integrations", {"format": "camel"}),
+        (f"{ext_base}/store/installed", {"format": "camel"}),
+        (f"{soar_base}/integrations", {"format": "camel", "pageSize": 1000}),
+    ]
+    raw_intgs = []
+    for path, params in intg_paths:
+        try:
+            data = await chronicle_request("GET", path, params=params)
+            raw_intgs = data if isinstance(data, list) else data.get("integrations", data.get("data", []))
+            if raw_intgs:
+                logger.info("Fetched %d integrations from %s", len(raw_intgs), path)
+                break
+        except Exception as e:
+            logger.debug("Integrations path %s failed: %s", path, e)
+
+    # Candidate paths for connector instances (heartbeat, type)
+    conn_paths = [
+        (f"{ext_base}/settings/connectors", {"format": "camel"}),
+        (f"{ext_base}/connectors", {"format": "camel"}),
+        (f"{ext_base}/integrations/connectors", {"format": "camel"}),
+    ]
+    raw_connectors = []
+    for path, params in conn_paths:
+        try:
+            data = await chronicle_request("GET", path, params=params)
+            raw_connectors = data if isinstance(data, list) else data.get("connectors", data.get("data", []))
+            if raw_connectors:
+                logger.info("Fetched %d connectors from %s", len(raw_connectors), path)
+                break
+        except Exception as e:
+            logger.debug("Connectors path %s failed: %s", path, e)
+
+    return raw_intgs, raw_connectors
+
+
 @app.get("/api/integrations")
 async def get_integrations():
     """
-    Fetch configured integrations and their health status.
-    Chronicle SOAR tracks connectors/integrations.
+    Fetch configured integrations/connectors, trying multiple API paths.
     """
-    url = f"{_get_soar_base()}/integrations"
-    data = await chronicle_request("GET", url, params={
-        "format": "camel",
-        "filter": "(internal != true) and (type = 'RESPONSE')",
-        "pageSize": 1000,
-    })
-    connectors = data.get("integrations", data.get("connectors", data.get("data", [])))
+    raw_intgs, raw_connectors = await _fetch_raw_integrations()
 
+    # ── 1. Index connectors by integration identifier ──
+    connectors_by_name: dict = {}
+    for c in raw_connectors:
+        name = c.get("integrationIdentifier", c.get("integration", c.get("name", "")))
+        if name:
+            hb_raw = c.get("lastHeartbeatTimeUnixTimeInMs", c.get("lastHeartbeatTime"))
+            hb_iso, _ = _parse_heartbeat_status(hb_raw)
+            connectors_by_name.setdefault(name, {
+                "lastHeartbeat": hb_iso,
+                "type": c.get("connectorType", c.get("type", "")),
+                "isEnabled": c.get("isEnabled", c.get("state") == "ENABLED"),
+                "connectorName": c.get("displayName", c.get("name", "")),
+            })
+
+    # ── 3. Merge and build response ──
     integrations = []
-    for conn in connectors:
-        last_heartbeat_raw = conn.get("lastHeartbeatTimeUnixTimeInMs", conn.get("lastHeartbeatTime"))
-        status = "Healthy"
-        if last_heartbeat_raw:
-            try:
-                if isinstance(last_heartbeat_raw, (int, float)):
-                    hb = datetime.utcfromtimestamp(last_heartbeat_raw / 1000)
-                else:
-                    hb = datetime.fromisoformat(str(last_heartbeat_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                age_min = (datetime.utcnow() - hb).total_seconds() / 60
-                if age_min > 30:
-                    status = "Error"
-                elif age_min > 10:
-                    status = "Degraded"
-            except (ValueError, TypeError):
-                status = "Unknown"
+    seen = set()
+    for intg in raw_intgs:
+        identifier = intg.get("identifier", intg.get("integrationIdentifier", intg.get("name", "")))
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+
+        connector_info = connectors_by_name.get(identifier, {})
+        hb_iso = connector_info.get("lastHeartbeat")
+        _, status = _parse_heartbeat_status(hb_iso)
 
         integrations.append({
-            "id": str(conn.get("id", conn.get("name", ""))),
-            "name": conn.get("displayName", conn.get("name", "Unknown")),
+            "id": identifier,
+            "name": intg.get("displayName", connector_info.get("connectorName", identifier)),
             "status": status,
-            "type": conn.get("connectorType", conn.get("integrationType", "")),
-            "lastHeartbeat": last_heartbeat_raw,
-            "version": conn.get("version", ""),
-            "isEnabled": conn.get("isEnabled", conn.get("state") == "ENABLED"),
+            "type": connector_info.get("type") or intg.get("category", intg.get("integrationType", "")),
+            "lastHeartbeat": hb_iso,
+            "version": intg.get("version", intg.get("currentVersion", "")),
+            "isEnabled": connector_info.get("isEnabled", intg.get("isEnabled", False)),
         })
+
+    # Add any connectors not in the integrations list
+    for name, info in connectors_by_name.items():
+        if name not in seen:
+            hb_iso = info.get("lastHeartbeat")
+            _, status = _parse_heartbeat_status(hb_iso)
+            integrations.append({
+                "id": name,
+                "name": info.get("connectorName", name),
+                "status": status,
+                "type": info.get("type", ""),
+                "lastHeartbeat": hb_iso,
+                "version": "",
+                "isEnabled": info.get("isEnabled", False),
+            })
 
     return {"integrations": integrations, "total": len(integrations)}
 
@@ -626,7 +710,7 @@ async def get_overview():
     """
     try:
         playbooks_data = await get_playbooks()
-        cases_data = await get_cases(days=30)
+        cases_data = await get_cases(days=30, status=None, severity=None, page_size=100)
         integrations_data = await get_integrations()
         trends_data = await get_case_trends(days=180)
 
