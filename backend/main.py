@@ -237,8 +237,8 @@ async def connect(req: ConnectRequest):
             if resp.status_code == 403:
                 raise HTTPException(status_code=403, detail="App Key lacks required permissions (403 Forbidden).")
             if resp.status_code == 404:
-                # Try alternate endpoint
-                resp = await client.get(
+                # Try alternate endpoint (POST)
+                resp = await client.post(
                     f"{host}/api/external/v1/playbooks/GetEnabledWFCards",
                     headers={**headers,
                              "Content-Type": "application/json;odata.metadata=minimal;odata.streaming=true",
