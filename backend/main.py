@@ -289,16 +289,17 @@ async def get_cases(
     Fetch cases from Chronicle SOAR with optional filters.
     """
     url = f"{SOAR_BASE}/cases"
-    start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+    start_iso = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    params = {"pageSize": page_size, "filter": f"createTime>={start_ms}"}
+    filter_parts = [f'createTime > "{start_iso}"']
     if status:
-        params["filter"] += f' AND status="{status}"'
+        filter_parts.append(f'status = "{status}"')
     if severity:
-        params["filter"] += f' AND severity="{severity}"'
+        filter_parts.append(f'severity = "{severity}"')
+    filter_str = " AND ".join(filter_parts)
 
-    data = await chronicle_request("GET", url, params=params)
-    cases = data.get("cases", data.get("data", []))
+    params = {"pageSize": page_size, "filter": filter_str}
+    cases = await chronicle_paginated_fetch(url, params, result_key="cases")
 
     severity_counts = {}
     status_counts = {}
@@ -352,16 +353,15 @@ async def get_case_trends(
     Aggregate case volume by week/month for trend analysis.
     """
     url = f"{SOAR_BASE}/cases"
-    start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
-    params = {"pageSize": 1000, "filter": f"createTime>={start_ms}"}
-    data = await chronicle_request("GET", url, params=params)
-    cases = data.get("cases", data.get("data", []))
+    start_iso = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params = {"pageSize": 1000, "filter": f'createTime > "{start_iso}"'}
+    cases = await chronicle_paginated_fetch(url, params, result_key="cases")
 
     monthly = {}
     for case in cases:
         created = case.get("createTime", "")
         if created:
-            month_key = created[:7]  # YYYY-MM
+            month_key = str(created)[:7]  # YYYY-MM
             if month_key not in monthly:
                 monthly[month_key] = {"total": 0, "automated": 0, "manual": 0}
             monthly[month_key]["total"] += 1
