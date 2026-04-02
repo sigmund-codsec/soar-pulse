@@ -1,0 +1,125 @@
+# ── CodSec SOAR Evaluator — Docker Compose ──
+# Orchestrates backend (FastAPI) + frontend (React/Nginx) + Redis cache
+#
+# Usage:
+#   docker compose up -d            # Start all services
+#   docker compose up -d --build    # Rebuild and start
+#   docker compose logs -f          # Tail logs
+#   docker compose down             # Stop all services
+#   docker compose down -v          # Stop and remove volumes
+
+services:
+  # ── FastAPI Backend ──
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: codsec-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      # Mount service account key if using SA auth
+      # - ./backend/service-account.json:/app/service-account.json:ro
+      - backend-logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - codsec-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # ── React Frontend (Nginx) ──
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: codsec-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - codsec-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # ── Redis Cache (optional but recommended) ──
+  redis:
+    image: redis:7-alpine
+    container_name: codsec-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 64mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    networks:
+      - codsec-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 96M
+
+  # ── Watchtower (auto-update containers) — optional ──
+  # Uncomment to enable automatic image updates
+  # watchtower:
+  #   image: containrrr/watchtower
+  #   container_name: codsec-watchtower
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   environment:
+  #     - WATCHTOWER_CLEANUP=true
+  #     - WATCHTOWER_POLL_INTERVAL=86400
+  #   networks:
+  #     - codsec-net
+
+networks:
+  codsec-net:
+    driver: bridge
+    name: codsec-network
+
+volumes:
+  backend-logs:
+    driver: local

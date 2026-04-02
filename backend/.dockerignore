@@ -1,0 +1,30 @@
+# ── Backend .dockerignore (place in ./backend/) ──
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+.git
+.gitignore
+*.md
+tests/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ── Frontend .dockerignore (place in ./frontend/) ──
+node_modules
+dist
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.md
+.vscode
+.idea
+coverage/
