@@ -230,6 +230,7 @@ function ConnectScreen({ onConnected }) {
   const [form, setForm] = useState({
     host: "",
     app_key: "",
+    bearer_token: "",
     project_id: "",
     region: "eu",
     instance_id: "",
@@ -241,8 +242,8 @@ function ConnectScreen({ onConnected }) {
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
   const handleConnect = async () => {
-    if (!form.host.trim() || !form.app_key.trim()) {
-      setError("Instance URL and App Key are required.");
+    if (!form.host.trim() || (!form.app_key.trim() && !form.bearer_token.trim())) {
+      setError("Instance URL and at least one credential (App Key or Bearer Token) are required.");
       return;
     }
     setConnecting(true); setError("");
@@ -299,7 +300,8 @@ function ConnectScreen({ onConnected }) {
         </p>
 
         <Field label="Instance URL" name="host" placeholder="https://rb.siemplify-soar.com" />
-        <Field label="App Key" name="app_key" type="password" placeholder="Paste your App Key" />
+        <Field label="App Key" name="app_key" type="password" placeholder="Settings → Integrations → API Key" />
+        <Field label="Bearer Token" name="bearer_token" type="password" placeholder="eyJhbGci… (optional if App Key set)" />
 
         <div style={{ marginBottom: 14 }}>
           <button onClick={() => setShowAdvanced(v => !v)} style={{
@@ -374,13 +376,6 @@ export default function App() {
     fetchData("cases", () => api.cases(30));
     fetchData("trends", () => api.caseTrends(180));
   }, [fetchData]);
-
-  useEffect(() => {
-    // Check if .env credentials are already configured on load
-    api.health().then(h => {
-      if (h.connected) { setConnected(true); loadAll(); }
-    }).catch(() => {});
-  }, [loadAll]);
 
   const handleConnected = () => { setConnected(true); loadAll(); };
 

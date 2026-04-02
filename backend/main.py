@@ -208,7 +208,8 @@ async def health():
 
 class ConnectRequest(BaseModel):
     host: str
-    app_key: str
+    app_key: Optional[str] = None
+    bearer_token: Optional[str] = None
     # v1alpha fields — optional, only needed for cases/integrations endpoints
     project_id: Optional[str] = None
     region: Optional[str] = None
@@ -224,11 +225,19 @@ async def connect(req: ConnectRequest):
     host = req.host.strip().rstrip("/")
     if not host.startswith("http"):
         host = f"https://{host}"
-    app_key = req.app_key.strip()
+    app_key = (req.app_key or "").strip()
+    bearer_token = (req.bearer_token or "").strip().removeprefix("Bearer ").strip()
+
+    if not app_key and not bearer_token:
+        raise HTTPException(status_code=400, detail="Provide either an App Key or a Bearer Token.")
 
     # Validate by hitting the external metadata endpoint
     test_url = f"{host}/api/external/v1/playbooks/GetPlaybooksMetadata"
-    headers = {"AppKey": app_key, "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if app_key:
+        headers["AppKey"] = app_key
+    else:
+        headers["Authorization"] = f"Bearer {bearer_token}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             resp = await client.get(test_url, headers=headers)
@@ -256,7 +265,10 @@ async def connect(req: ConnectRequest):
     stored_host = host.removeprefix("https://").removeprefix("http://")
 
     # Store runtime credentials
-    _runtime["app_key"] = app_key
+    if app_key:
+        _runtime["app_key"] = app_key
+    if bearer_token:
+        _runtime["token"] = bearer_token
     _runtime["host"] = stored_host
     if req.project_id:
         _runtime["project_id"] = req.project_id
