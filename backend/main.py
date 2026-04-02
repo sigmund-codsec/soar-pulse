@@ -140,6 +140,9 @@ async def chronicle_paginated_fetch(
         page_token = data.get("nextPageToken")
         if not page_token:
             break
+    else:
+        if page_token:
+            logger.warning(f"Pagination limit ({max_pages} pages) reached for {url} — results may be incomplete")
 
     return all_items
 
@@ -199,8 +202,7 @@ async def get_playbooks():
     # Primary: new-style v1alpha playbooks list
     try:
         url = f"{SOAR_BASE}/playbooks"
-        data = await chronicle_request("GET", url, params={"pageSize": 1000})
-        playbooks_raw = data.get("playbooks", [])
+        playbooks_raw = await chronicle_paginated_fetch(url, {"pageSize": 1000}, result_key="playbooks")
         logger.info(f"Fetched {len(playbooks_raw)} playbooks via GET /playbooks")
     except HTTPException as e:
         logger.warning(f"GET /playbooks failed ({e.status_code}), trying legacy endpoint")
