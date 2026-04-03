@@ -179,24 +179,51 @@ const chartTooltipStyle = {
 
 // ── Loading Progress Bar ──────────────────────────────────────────────
 
-function LoadingBar({ keys, loading }) {
+function LoadingOverlay({ keys, loading }) {
   const total = keys.length;
   const done = keys.filter(k => loading[k] === false).length;
-  // only show while at least one is loading
   const anyLoading = keys.some(k => loading[k] === true);
   const pct = total === 0 ? 100 : Math.round((done / total) * 100);
 
   if (!anyLoading && pct === 100) return null;
 
+  const size = 140;
+  const stroke = 10;
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const offset = circ - (pct / 100) * circ;
+
   return (
-    <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999, height: 3 }}>
-      <div style={{
-        height: "100%",
-        width: `${pct}%`,
-        background: theme.gradient,
-        transition: "width 0.4s ease",
-        boxShadow: `0 0 8px ${theme.accentGlow}`,
-      }} />
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      background: "rgba(10, 2, 18, 0.85)", backdropFilter: "blur(6px)",
+    }}>
+      <svg width={size} height={size}>
+        <defs>
+          <linearGradient id="loadGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#da009e" />
+            <stop offset="50%" stopColor="#a855f7" />
+            <stop offset="100%" stopColor="#6cb4ff" />
+          </linearGradient>
+        </defs>
+        {/* Track */}
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={theme.border} strokeWidth={stroke} />
+        {/* Progress arc */}
+        <circle cx={size/2} cy={size/2} r={r} fill="none"
+          stroke="url(#loadGrad)" strokeWidth={stroke}
+          strokeDasharray={circ} strokeDashoffset={offset}
+          strokeLinecap="round"
+          transform={`rotate(-90 ${size/2} ${size/2})`}
+          style={{ transition: "stroke-dashoffset 0.4s ease" }}
+        />
+        {/* Percentage text */}
+        <text x={size/2} y={size/2 - 6} textAnchor="middle" fill={theme.text} fontSize={28} fontWeight={700}>{pct}%</text>
+        <text x={size/2} y={size/2 + 16} textAnchor="middle" fill={theme.textMuted} fontSize={11}>Loading</text>
+      </svg>
+      <div style={{ marginTop: 18, fontSize: 13, color: theme.textDim }}>
+        {done} of {total} data sources
+      </div>
     </div>
   );
 }
@@ -396,6 +423,25 @@ const YesNo = ({ val, yesColor, noColor }) => (
   </span>
 );
 
+function VersionRiskBadge({ risk }) {
+  const map = {
+    high:    { label: "High",    bg: "#3d1a1a", color: "#f87171" },
+    medium:  { label: "Medium",  bg: "#3d2e10", color: "#fbbf24" },
+    low:     { label: "Low",     bg: "#132d1f", color: "#4ade80" },
+    ok:      { label: "OK",      bg: "transparent", color: "#6b7280" },
+    unknown: { label: "Unknown", bg: "transparent", color: "#6b7280" },
+  };
+  const s = map[risk] || map.unknown;
+  return (
+    <span style={{
+      background: s.bg, color: s.color,
+      borderRadius: 6, padding: "2px 8px",
+      fontSize: 11, fontWeight: 600,
+      border: s.bg !== "transparent" ? `1px solid ${s.color}33` : "none",
+    }}>{s.label}</span>
+  );
+}
+
 // Helper: tag pill
 const Tag = ({ children }) => (
   <span style={{
@@ -464,7 +510,7 @@ export default function App() {
     fetchData("overview", api.overview);
     fetchData("playbooks", api.playbooks);
     fetchData("cases", () => api.cases(30));
-    fetchData("trends", () => api.caseTrends(180));
+    fetchData("trends", () => api.caseTrends(90));
     fetchData("connectors", api.connectors);
     fetchData("webhooks", api.webhooks);
     fetchData("environments", api.environments);
@@ -585,6 +631,9 @@ export default function App() {
   const ideCols = [
     { key: "name", label: "Integration", tdStyle: { fontWeight: 500 } },
     { key: "isCustom", label: "Custom", render: r => <YesNo val={r.isCustom} yesColor={theme.purple} noColor={theme.textMuted} /> },
+    { key: "installedVersion", label: "Installed", tdStyle: { fontFamily: "monospace", fontSize: 12 } },
+    { key: "latestVersion",    label: "Latest",    tdStyle: { fontFamily: "monospace", fontSize: 12 } },
+    { key: "versionRisk",      label: "Risk",      render: r => <VersionRiskBadge risk={r.versionRisk} /> },
     {
       key: "actions", label: "Actions", noSort: true,
       render: r => (
@@ -605,8 +654,8 @@ export default function App() {
         .spinning { animation: spin 1s linear infinite }
       `}</style>
 
-      {/* Global loading progress bar */}
-      <LoadingBar keys={ALL_KEYS} loading={loading} />
+      {/* Global loading overlay */}
+      <LoadingOverlay keys={ALL_KEYS} loading={loading} />
 
       {/* Header */}
       <header style={{
@@ -663,14 +712,14 @@ export default function App() {
                 <StatCard icon={Layers} label="Playbooks" value={ov.totalPlaybooks || 0} sub={`${ov.activePlaybooks || 0} active · ${ov.disabledPlaybooks || 0} disabled`} />
                 <StatCard icon={FileSearch} label="Cases (30d)" value={(ov.totalCases30d || 0).toLocaleString()} color={theme.accent} glow={theme.accentGlow} />
                 <StatCard icon={Clock} label="Avg MTTR" value={`${ov.avgMttrHours || 0}h`} sub="Mean time to resolve" />
-                <StatCard icon={Zap} label="Automation" value={`${ov.automationRate || 0}%`} color={theme.green} glow={theme.greenDim} sub="Benchmark: ~60%" />
+                <StatCard icon={Zap} label="Close Rate" value={`${ov.automationRate || 0}%`} color={theme.green} glow={theme.greenDim} sub="Closed / total cases (90d)" />
               </div>
               <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                 <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "2 1 360px" }}>
                   <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Case Volume Trend</div>
                   <div style={{ display: "flex", gap: 16, fontSize: 11, color: theme.textMuted, marginBottom: 12 }}>
-                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.accent, marginRight: 5 }} />Automated</span>
-                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.purple, marginRight: 5 }} />Manual</span>
+                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.accent, marginRight: 5 }} />Closed</span>
+                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.purple, marginRight: 5 }} />Open</span>
                   </div>
                   <ResponsiveContainer width="100%" height={200}>
                     <AreaChart data={ov.caseTrends || []}>
@@ -909,14 +958,19 @@ export default function App() {
               columns={ideCols}
               rows={ideRows}
               searchKeys={["name"]}
-              filters={[{ key: "isCustom", label: "Custom", values: ["All", "true", "false"] }]}
+              filters={[
+                { key: "isCustom", label: "Custom", values: ["All", "true", "false"] },
+                { key: "versionRisk", label: "Risk", values: ["All", "high", "medium", "low", "ok", "unknown"] },
+              ]}
               statsBar={
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Code} label="Integrations" value={data.ide?.total || 0} />
                   <StatCard icon={Zap} label="Custom" value={ideRows.filter(i => i.isCustom).length} color={theme.purple} />
+                  <StatCard icon={AlertTriangle} label="High Risk" value={ideRows.filter(i => i.versionRisk === "high").length} color="#f87171" />
+                  <StatCard icon={AlertTriangle} label="Medium Risk" value={ideRows.filter(i => i.versionRisk === "medium").length} color={theme.yellow} />
                 </div>
               }
-              emptyMsg="No integrations found."
+              emptyMsg="No integrations match your filters."
             />
           )
         )}
