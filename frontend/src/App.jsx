@@ -713,6 +713,14 @@ export default function App() {
                 <StatCard icon={FileSearch} label="Cases (30d)" value={(ov.totalCases30d || 0).toLocaleString()} color={theme.accent} glow={theme.accentGlow} />
                 <StatCard icon={Clock} label="Avg MTTR" value={`${ov.avgMttrHours || 0}h`} sub="Mean time to resolve" />
                 <StatCard icon={Zap} label="Close Rate" value={`${ov.automationRate || 0}%`} color={theme.green} glow={theme.greenDim} sub="Closed / total cases (90d)" />
+                <StatCard
+                  icon={AlertTriangle}
+                  label="Outdated Integrations"
+                  value={(ov.outdatedHigh || 0) + (ov.outdatedMedium || 0)}
+                  color={(ov.outdatedHigh || 0) > 0 ? "#f87171" : theme.yellow}
+                  glow={(ov.outdatedHigh || 0) > 0 ? "#f8717133" : undefined}
+                  sub={`${ov.outdatedHigh || 0} major · ${ov.outdatedMedium || 0} minor behind`}
+                />
               </div>
               <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                 <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "2 1 360px" }}>
