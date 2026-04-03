@@ -10,6 +10,7 @@ Setup:
   3. uvicorn main:app --reload --port 8000
 """
 
+import asyncio
 import os
 import logging
 from datetime import datetime, timedelta
@@ -31,6 +32,7 @@ CHRONICLE_INSTANCE = os.getenv("CHRONICLE_INSTANCE_ID")
 CHRONICLE_REGION = os.getenv("CHRONICLE_REGION", "eu")
 CHRONICLE_PROJECT_ID = os.getenv("CHRONICLE_PROJECT_ID")
 CHRONICLE_SA_FILE = os.getenv("CHRONICLE_SA_FILE")
+CHRONICLE_API_KEY = os.getenv("CHRONICLE_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("codsec")
@@ -42,7 +44,8 @@ def _get_token() -> Optional[str]:
     return _runtime.get("token") or CHRONICLE_BEARER_TOKEN
 
 def _get_app_key() -> Optional[str]:
-    return _runtime.get("app_key") or os.getenv("CHRONICLE_APP_KEY")
+    """App Key for legacy Siemplify external API (AppKey header). Uses CHRONICLE_API_KEY."""
+    return _runtime.get("app_key") or CHRONICLE_API_KEY
 
 def _get_base_url() -> str:
     """Base URL for the SOAR host (e.g. https://rb.siemplify-soar.com)."""
@@ -93,7 +96,7 @@ async def chronicle_request(
     else:
         raise HTTPException(
             status_code=401,
-            detail="No Chronicle credentials configured. Use the connect screen to provide your credentials.",
+            detail="No Chronicle credentials configured. Check CHRONICLE_BEARER_TOKEN or CHRONICLE_API_KEY in .env.",
         )
 
     headers["Content-Type"] = "application/json"
@@ -296,11 +299,14 @@ async def disconnect():
 
 # ── Playbooks ─────────────────────────────────────────────────────────
 
-def _parse_playbook_status(pb: dict) -> str:
+def _parse_playbook_status(pb: dict, full: dict = None) -> str:
     """Normalize playbook status from various API response formats."""
+    full = full or {}
     if pb.get("isPublished") or pb.get("published"):
         return "Active"
     if pb.get("state") == "ENABLED" or pb.get("isEnabled") is True:
+        return "Active"
+    if full.get("isEnabled") is True:
         return "Active"
     if pb.get("isActive") is True:
         return "Active"
@@ -392,29 +398,141 @@ async def _fetch_playbooks_metadata() -> list:
     )
 
 
-def _normalise_playbook(pb: dict) -> dict:
-    """Normalise a raw playbook metadata dict to our API shape."""
-    modified = pb.get("modificationTime") or pb.get("lastModified") or pb.get("modifiedTime") or ""
-    identifier = (
+_SKIP_INTEGRATIONS = {"Flow", "SiemplifyUtilities", "SiemplifyTools", "AutomaticEnvironment", "Siemplify"}
+
+def _extract_integrations(meta: dict, full: dict) -> list[str]:
+    """Extract integration names from playbook detail (SOARLens pattern)."""
+    found = set()
+
+    def push(v):
+        if not v:
+            return
+        if isinstance(v, list):
+            for x in v:
+                push(x)
+        elif isinstance(v, str):
+            clean = v.strip()
+            if clean and clean not in _SKIP_INTEGRATIONS:
+                found.add(clean)
+
+    def scan(obj):
+        if not obj or not isinstance(obj, dict):
+            return
+        push(obj.get("integration"))
+        push(obj.get("integrationIdentifier"))
+        push(obj.get("actionProvider"))
+        if isinstance(obj.get("integrations"), list):
+            push(obj["integrations"])
+        for param in obj.get("parameters", []):
+            if isinstance(param, dict) and param.get("name") == "IntegrationInstance":
+                push(param.get("value"))
+        for step in obj.get("steps", obj.get("workflowSteps", obj.get("actions", []))):
+            scan(step)
+
+    scan(full)
+    if full.get("workflow"):
+        scan(full["workflow"])
+
+    # fallback to metadata if nothing found
+    if not found:
+        scan(meta)
+        push(meta.get("integration"))
+        push(meta.get("integrations"))
+
+    return sorted(found)
+
+
+def _count_steps(full: dict) -> int:
+    for key in ("steps", "workflowSteps", "actions"):
+        steps = full.get(key) or (full.get("workflow") or {}).get(key, [])
+        if isinstance(steps, list) and steps:
+            return len(steps)
+    return 0
+
+
+async def _fetch_playbook_detail(client: httpx.AsyncClient, identifier: str, headers: dict) -> dict:
+    """Fetch full playbook detail via GetWorkflowFullInfoByIdentifier."""
+    if not identifier:
+        return {}
+    base = _get_base_url()
+    paths = [
+        f"/api/external/v1/playbooks/GetWorkflowFullInfoByIdentifier/{identifier}",
+        f"/api/external/v1/workflows/GetWorkflowFullInfoByIdentifier/{identifier}",
+    ]
+    for path in paths:
+        try:
+            resp = await client.get(f"{base}{path}", headers=headers)
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            continue
+    return {}
+
+
+def _get_pb_identifier(pb: dict) -> str:
+    return (
+        pb.get("workflowDefinitionIdentifier") or
         pb.get("identifier") or pb.get("id") or
-        pb.get("workflowIdentifier") or pb.get("originalPlaybookIdentifier") or ""
+        pb.get("workflowIdentifier") or pb.get("originalPlaybookIdentifier") or
+        pb.get("originalWorkflowDefinitionIdentifier") or ""
     )
+
+
+def _normalise_playbook(pb: dict, full: dict = None) -> dict:
+    """Normalise a raw playbook metadata dict to our API shape."""
+    full = full or {}
+    modified = (
+        full.get("modificationTimeUnixTimeInMs") or
+        pb.get("modificationTime") or pb.get("lastModified") or pb.get("modifiedTime") or ""
+    )
+    if isinstance(modified, (int, float)) and modified > 0:
+        from datetime import timezone
+        modified = datetime.utcfromtimestamp(modified / 1000).strftime("%Y-%m-%d")
+    identifier = _get_pb_identifier(pb)
     return {
         "id": str(identifier),
         "name": pb.get("name") or pb.get("playbookName") or pb.get("title") or "Unnamed",
-        "status": _parse_playbook_status(pb),
-        "description": pb.get("description") or "",
+        "status": _parse_playbook_status(pb, full),
+        "description": pb.get("description") or full.get("description") or "",
         "createTime": pb.get("creationTime") or pb.get("createTime") or pb.get("createdTime"),
         "updateTime": modified or None,
         "category": pb.get("category") or pb.get("playbookType") or pb.get("workflowType") or "General",
+        "integrations": _extract_integrations(pb, full),
+        "steps": _count_steps(full),
+        "environments": pb.get("environments") or [],
+        "playbookType": "Block" if pb.get("playbookType") == 1 else "Playbook",
     }
 
 
 @app.get("/api/playbooks")
 async def get_playbooks():
-    """Fetch all playbooks from Chronicle SOAR via the external API."""
+    """
+    Fetch all playbooks with full detail (integrations, steps) — SOARLens pattern.
+    All detail requests run fully concurrently with a per-request timeout of 8s.
+    Total endpoint timeout is handled by uvicorn (120s).
+    """
     playbooks_raw = await _fetch_playbooks_metadata()
-    playbooks = [_normalise_playbook(pb) for pb in playbooks_raw]
+
+    app_key = _get_app_key()
+    token = _get_token()
+    headers = {"Content-Type": "application/json"}
+    if app_key:
+        headers["AppKey"] = app_key
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        details = await asyncio.gather(*[
+            _fetch_playbook_detail(client, _get_pb_identifier(pb), headers)
+            for pb in playbooks_raw
+        ], return_exceptions=True)
+
+    playbooks = [
+        _normalise_playbook(pb, full if isinstance(full, dict) else {})
+        for pb, full in zip(playbooks_raw, details)
+    ]
     return {"playbooks": playbooks, "total": len(playbooks)}
 
 
@@ -482,14 +600,20 @@ async def get_cases(
     url = f"{_get_soar_base()}/cases"
     start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
 
-    filter_parts = [f"createTime gt {start_ms}"]
+    filter_parts = [f"createTime > {start_ms}"]
     if status:
-        filter_parts.append(f"status eq '{status}'")
+        filter_parts.append(f"status = '{status}'")
     if severity:
-        filter_parts.append(f"severity eq '{severity}'")
+        filter_parts.append(f"severity = '{severity}'")
     filter_str = " and ".join(filter_parts)
 
-    params = {"pageSize": page_size, "filter": filter_str}
+    params = {
+        "format": "camel",
+        "expand": "products, tasks, tags, closureDetails, sla, alertsSla",
+        "filter": filter_str,
+        "orderBy": "updateTime desc",
+        "pageSize": page_size,
+    }
     cases = await chronicle_paginated_fetch(url, params, result_key="cases")
 
     severity_counts = {}
@@ -545,7 +669,7 @@ async def get_case_trends(
     """
     url = f"{_get_soar_base()}/cases"
     start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
-    params = {"pageSize": 1000, "filter": f"createTime gt {start_ms}"}
+    params = {"format": "camel", "pageSize": 1000, "filter": f"createTime > {start_ms}"}
     cases = await chronicle_paginated_fetch(url, params, result_key="cases")
 
     monthly = {}
@@ -569,135 +693,246 @@ async def get_case_trends(
     return {"trends": trend, "period_days": days}
 
 
-# ── Integrations ──────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────
 
-def _parse_heartbeat_status(last_heartbeat_raw):
-    """Parse a raw heartbeat value and return (iso_string_or_None, status_string)."""
-    if not last_heartbeat_raw:
-        return None, "Unknown"
-    try:
-        if isinstance(last_heartbeat_raw, (int, float)):
-            hb = datetime.utcfromtimestamp(last_heartbeat_raw / 1000)
-        else:
-            hb = datetime.fromisoformat(str(last_heartbeat_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-        age_min = (datetime.utcnow() - hb).total_seconds() / 60
-        if age_min > 30:
-            status = "Error"
-        elif age_min > 10:
-            status = "Degraded"
-        else:
-            status = "Healthy"
-        return hb.strftime("%Y-%m-%dT%H:%M:%SZ"), status
-    except (ValueError, TypeError):
-        return None, "Unknown"
+def _ext() -> str:
+    """Base URL for the legacy Siemplify external API."""
+    return f"{_get_base_url()}/api/external/v1"
 
 
-async def _fetch_raw_integrations() -> tuple[list, list]:
-    """
-    Try multiple endpoint paths to fetch integration and connector data.
-    Returns (raw_integrations, raw_connectors).
-    """
-    ext_base = f"{_get_base_url()}/api/external/v1"
-    soar_base = _get_soar_base()
-
-    # Candidate paths for installed integrations (version, display name)
-    intg_paths = [
-        (f"{ext_base}/settings/integrations", {"format": "camel"}),
-        (f"{ext_base}/integrations", {"format": "camel"}),
-        (f"{ext_base}/store/installed", {"format": "camel"}),
-        (f"{soar_base}/integrations", {"format": "camel", "pageSize": 1000}),
-    ]
-    raw_intgs = []
-    for path, params in intg_paths:
-        try:
-            data = await chronicle_request("GET", path, params=params)
-            raw_intgs = data if isinstance(data, list) else data.get("integrations", data.get("data", []))
-            if raw_intgs:
-                logger.info("Fetched %d integrations from %s", len(raw_intgs), path)
-                break
-        except Exception as e:
-            logger.debug("Integrations path %s failed: %s", path, e)
-
-    # Candidate paths for connector instances (heartbeat, type)
-    conn_paths = [
-        (f"{ext_base}/settings/connectors", {"format": "camel"}),
-        (f"{ext_base}/connectors", {"format": "camel"}),
-        (f"{ext_base}/integrations/connectors", {"format": "camel"}),
-    ]
-    raw_connectors = []
-    for path, params in conn_paths:
-        try:
-            data = await chronicle_request("GET", path, params=params)
-            raw_connectors = data if isinstance(data, list) else data.get("connectors", data.get("data", []))
-            if raw_connectors:
-                logger.info("Fetched %d connectors from %s", len(raw_connectors), path)
-                break
-        except Exception as e:
-            logger.debug("Connectors path %s failed: %s", path, e)
-
-    return raw_intgs, raw_connectors
+async def _paginated_post(endpoint: str, base_payload: dict) -> list:
+    """POST with Siemplify-style page iteration (requestedPage / totalNumberOfPages)."""
+    results = []
+    payload = {**base_payload, "requestedPage": 0, "pageSize": 200}
+    while True:
+        data = await chronicle_request("POST", f"{_ext()}/{endpoint}", json_body=payload)
+        if not data:
+            break
+        items = data.get("objectsList", data if isinstance(data, list) else [])
+        results.extend(items)
+        total_pages = data.get("metadata", {}).get("totalNumberOfPages", 1) if isinstance(data, dict) else 1
+        if payload["requestedPage"] >= total_pages - 1:
+            break
+        payload["requestedPage"] += 1
+    return results
 
 
-@app.get("/api/integrations")
-async def get_integrations():
-    """
-    Fetch configured integrations/connectors, trying multiple API paths.
-    """
-    raw_intgs, raw_connectors = await _fetch_raw_integrations()
+# ── Connectors ────────────────────────────────────────────────────────
 
-    # ── 1. Index connectors by integration identifier ──
-    connectors_by_name: dict = {}
-    for c in raw_connectors:
-        name = c.get("integrationIdentifier", c.get("integration", c.get("name", "")))
-        if name:
-            hb_raw = c.get("lastHeartbeatTimeUnixTimeInMs", c.get("lastHeartbeatTime"))
-            hb_iso, _ = _parse_heartbeat_status(hb_raw)
-            connectors_by_name.setdefault(name, {
-                "lastHeartbeat": hb_iso,
-                "type": c.get("connectorType", c.get("type", "")),
-                "isEnabled": c.get("isEnabled", c.get("state") == "ENABLED"),
-                "connectorName": c.get("displayName", c.get("name", "")),
+@app.get("/api/connectors")
+async def get_connectors():
+    """Fetch connector cards from connectors/cards (SOARManager pattern)."""
+    data = await chronicle_request("GET", f"{_ext()}/connectors/cards")
+    raw = data if isinstance(data, list) else data.get("connectors", data.get("data", []))
+    result = {}
+    for group in raw:
+        integration = group.get("integration", "Unknown")
+        cards = []
+        for card in group.get("cards", []):
+            cards.append({
+                "name": card.get("displayName", card.get("name", "")),
+                "isEnabled": card.get("isEnabled", False),
             })
+        if cards:
+            result[integration] = cards
+    return {"connectors": result, "total": sum(len(v) for v in result.values())}
 
-    # ── 3. Merge and build response ──
-    integrations = []
-    seen = set()
-    for intg in raw_intgs:
-        identifier = intg.get("identifier", intg.get("integrationIdentifier", intg.get("name", "")))
-        if not identifier or identifier in seen:
-            continue
-        seen.add(identifier)
 
-        connector_info = connectors_by_name.get(identifier, {})
-        hb_iso = connector_info.get("lastHeartbeat")
-        _, status = _parse_heartbeat_status(hb_iso)
+# ── Webhooks ──────────────────────────────────────────────────────────
 
-        integrations.append({
-            "id": identifier,
-            "name": intg.get("displayName", connector_info.get("connectorName", identifier)),
-            "status": status,
-            "type": connector_info.get("type") or intg.get("category", intg.get("integrationType", "")),
-            "lastHeartbeat": hb_iso,
-            "version": intg.get("version", intg.get("currentVersion", "")),
-            "isEnabled": connector_info.get("isEnabled", intg.get("isEnabled", False)),
+@app.get("/api/webhooks")
+async def get_webhooks():
+    """Fetch webhook cards and their details."""
+    data = await chronicle_request("GET", f"{_ext()}/webhooks-management/cards")
+    raw = data if isinstance(data, list) else data.get("webhooks", data.get("data", []))
+    webhooks = []
+    for wh in raw:
+        identifier = wh.get("identifier", "")
+        detail = {}
+        if identifier:
+            try:
+                detail = await chronicle_request("GET", f"{_ext()}/webhooks-management/{identifier}")
+            except Exception:
+                pass
+        webhooks.append({
+            "identifier": identifier,
+            "name": detail.get("name", wh.get("name", wh.get("displayName", ""))),
+            "environment": detail.get("defaultEnvironment", ""),
+            "isEnabled": detail.get("isEnabled", wh.get("isEnabled", False)),
         })
+    return {"webhooks": webhooks, "total": len(webhooks)}
 
-    # Add any connectors not in the integrations list
-    for name, info in connectors_by_name.items():
-        if name not in seen:
-            hb_iso = info.get("lastHeartbeat")
-            _, status = _parse_heartbeat_status(hb_iso)
-            integrations.append({
-                "id": name,
-                "name": info.get("connectorName", name),
-                "status": status,
-                "type": info.get("type", ""),
-                "lastHeartbeat": hb_iso,
-                "version": "",
-                "isEnabled": info.get("isEnabled", False),
+
+# ── Environments ──────────────────────────────────────────────────────
+
+@app.get("/api/environments")
+async def get_environments():
+    """Fetch all SOAR environments."""
+    items = await _paginated_post("settings/GetEnvironments", {"searchTerm": ""})
+    envs = [item.get("name", "") for item in items if item.get("name")]
+    return {"environments": envs, "total": len(envs)}
+
+
+# ── Remote Agents ─────────────────────────────────────────────────────
+
+@app.get("/api/agents")
+async def get_agents():
+    """Fetch remote agents and their communication status."""
+    STATUS_MAP = {0: "Live", 1: "Failed", 2: "Idle", 3: "Pending", 4: "Disabled"}
+    data = await chronicle_request("GET", f"{_ext()}/agents/GetAgents")
+    agents_raw = data if isinstance(data, list) else data.get("agents", data.get("data", []))
+
+    agent_ids = [a.get("identifier", "") for a in agents_raw if a.get("identifier")]
+    statuses = {}
+    if agent_ids:
+        try:
+            status_data = await chronicle_request(
+                "POST", f"{_ext()}/agents/GetAgentsInformationByIdentifiers",
+                json_body={"agentIdentifiers": agent_ids}
+            )
+            status_list = status_data if isinstance(status_data, list) else status_data.get("data", [])
+            for s in status_list:
+                statuses[s.get("agentIdentifier", "")] = STATUS_MAP.get(s.get("communicationStatus", -1), "Unknown")
+        except Exception as e:
+            logger.warning("Could not fetch agent statuses: %s", e)
+
+    result = []
+    for a in agents_raw:
+        aid = a.get("identifier", "")
+        result.append({
+            "identifier": aid,
+            "name": a.get("name", ""),
+            "environments": a.get("environments", []),
+            "status": statuses.get(aid, "Unknown"),
+        })
+    return {"agents": result, "total": len(result)}
+
+
+# ── API Keys ──────────────────────────────────────────────────────────
+
+@app.get("/api/api-keys")
+async def get_api_keys():
+    """Fetch configured API keys (names + environments only, no values)."""
+    data = await chronicle_request("GET", f"{_ext()}/settings/GetApiKeys")
+    raw = data if isinstance(data, list) else data.get("apiKeys", data.get("data", []))
+    keys = [{"name": k.get("name", ""), "environments": k.get("environments", [])} for k in raw]
+    return {"apiKeys": keys, "total": len(keys)}
+
+
+# ── Users ─────────────────────────────────────────────────────────────
+
+@app.get("/api/users")
+async def get_users():
+    """Fetch user profiles."""
+    items = await _paginated_post("settings/GetUserProfiles", {
+        "searchTerm": "",
+        "filterDisabledUsers": False,
+        "filterRole": False,
+        "filterPermissionTypes": [],
+        "filterSupportUsers": True,
+        "fetchOnlySupportUsers": False,
+    })
+    users = []
+    for u in items:
+        users.append({
+            "id": u.get("id", ""),
+            "email": u.get("email", ""),
+            "socRoles": u.get("socRoles", []),
+            "environments": u.get("environments", []),
+            "providerName": u.get("providerName", ""),
+            "isDisabled": u.get("isDisabled", False),
+            "isDeleted": u.get("isDeleted", False),
+        })
+    return {"users": users, "total": len(users)}
+
+
+# ── Integration Instances ─────────────────────────────────────────────
+
+@app.get("/api/integration-instances")
+async def get_integration_instances():
+    """Fetch integration instances across all environments."""
+    instances = []
+
+    # Shared environment
+    try:
+        shared = await chronicle_request(
+            "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
+            json_body={"name": "*"}
+        )
+        for i in shared.get("instances", []):
+            instances.append({
+                "environment": "Shared",
+                "type": i.get("integrationIdentifier", ""),
+                "name": i.get("instanceName", ""),
+                "isRemote": i.get("isRemote", False),
             })
+    except Exception as e:
+        logger.warning("Could not fetch shared integration instances: %s", e)
 
-    return {"integrations": integrations, "total": len(integrations)}
+    # Per-environment instances
+    try:
+        envs = await _paginated_post("settings/GetEnvironments", {"searchTerm": ""})
+        for env in envs:
+            env_name = env.get("name", "")
+            if not env_name:
+                continue
+            try:
+                env_data = await chronicle_request(
+                    "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
+                    json_body={"name": env_name}
+                )
+                for i in env_data.get("instances", []):
+                    instances.append({
+                        "environment": env_name,
+                        "type": i.get("integrationIdentifier", ""),
+                        "name": i.get("instanceName", ""),
+                        "isRemote": i.get("isRemote", False),
+                    })
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("Could not fetch environments for integration instances: %s", e)
+
+    return {"instances": instances, "total": len(instances)}
+
+
+# ── Jobs ──────────────────────────────────────────────────────────────
+
+@app.get("/api/jobs")
+async def get_jobs():
+    """Fetch installed SOAR jobs."""
+    data = await chronicle_request("GET", f"{_ext()}/jobs/GetInstalledJobs")
+    raw = data if isinstance(data, list) else data.get("jobs", data.get("data", []))
+    jobs = [
+        {
+            "name": j.get("name", ""),
+            "integration": j.get("integration", ""),
+            "isEnabled": j.get("isEnabled", False),
+            "isCustom": j.get("isCustom", False),
+        }
+        for j in raw
+    ]
+    return {"jobs": jobs, "total": len(jobs)}
+
+
+# ── IDE / Integration Actions ─────────────────────────────────────────
+
+@app.get("/api/ide")
+async def get_ide():
+    """Fetch installed integrations with their supported actions."""
+    data = await chronicle_request(
+        "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
+        json_body={"name": "*"}
+    )
+    ides = []
+    for intg in data.get("integrations", []):
+        actions = [f.get("name", "") for f in intg.get("integrationSupportedActions", [])]
+        ides.append({
+            "name": intg.get("displayName", ""),
+            "isCustom": intg.get("isCustom", False),
+            "actions": actions,
+        })
+    return {"integrations": ides, "total": len(ides)}
 
 
 # ── Overview / Aggregated Stats ───────────────────────────────────────
@@ -711,7 +946,7 @@ async def get_overview():
     try:
         playbooks_data = await get_playbooks()
         cases_data = await get_cases(days=30, status=None, severity=None, page_size=100)
-        integrations_data = await get_integrations()
+        integrations_data = await get_connectors()
         trends_data = await get_case_trends(days=180)
 
         pbs = playbooks_data["playbooks"]
@@ -722,8 +957,8 @@ async def get_overview():
         open_cases = cases_data["status_breakdown"].get("OPEN", 0) + \
                      cases_data["status_breakdown"].get("IN_PROGRESS", 0)
 
-        healthy_int = sum(1 for i in integrations_data["integrations"] if i["status"] == "Healthy")
         total_int = integrations_data["total"]
+        healthy_int = total_int  # connectors/cards doesn't expose heartbeat; count as total
 
         # Calculate automation rate from trends
         trends = trends_data["trends"]
@@ -753,8 +988,8 @@ async def get_overview():
             "integrationHealth": {
                 "total": total_int,
                 "healthy": healthy_int,
-                "degraded": sum(1 for i in integrations_data["integrations"] if i["status"] == "Degraded"),
-                "error": sum(1 for i in integrations_data["integrations"] if i["status"] == "Error"),
+                "degraded": 0,
+                "error": 0,
             },
             "severityBreakdown": cases_data["severity_breakdown"],
             "caseTrends": trends,

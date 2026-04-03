@@ -18,6 +18,7 @@ import {
 import {
   Shield, Activity, AlertTriangle, CheckCircle, XCircle, Clock,
   Zap, TrendingUp, Layers, Link2, FileSearch, RefreshCw, Loader2,
+  Plug, Webhook, Globe, Bot, Key, Users, Package, Briefcase, Code,
 } from "lucide-react";
 
 // ── API Service ──────────────────────────────────────────────────────
@@ -38,19 +39,20 @@ async function apiFetch(endpoint, params = {}) {
 }
 
 const api = {
-  health: () => apiFetch("/api/health"),
-  connect: (body) => fetch(`${API_BASE}/api/connect`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }).then(async r => { if (!r.ok) { const e = await r.json().catch(() => ({ detail: r.statusText })); throw new Error(e.detail || `Error ${r.status}`); } return r.json(); }),
-  disconnect: () => fetch(`${API_BASE}/api/disconnect`, { method: "POST" }).then(r => r.json()),
   overview: () => apiFetch("/api/overview"),
   playbooks: () => apiFetch("/api/playbooks"),
   playbookRuns: (id, days) => apiFetch(`/api/playbooks/${id}/runs`, { days }),
   cases: (days, status, severity) => apiFetch("/api/cases", { days, status, severity }),
   caseTrends: (days) => apiFetch("/api/cases/trends", { days }),
-  integrations: () => apiFetch("/api/integrations"),
+  connectors: () => apiFetch("/api/connectors"),
+  webhooks: () => apiFetch("/api/webhooks"),
+  environments: () => apiFetch("/api/environments"),
+  agents: () => apiFetch("/api/agents"),
+  apiKeys: () => apiFetch("/api/api-keys"),
+  users: () => apiFetch("/api/users"),
+  instances: () => apiFetch("/api/integration-instances"),
+  jobs: () => apiFetch("/api/jobs"),
+  ide: () => apiFetch("/api/ide"),
   findings: () => apiFetch("/api/findings"),
 };
 
@@ -81,21 +83,22 @@ const theme = {
 // ── Logo Component ───────────────────────────────────────────────────
 
 const CodSecLogo = ({ size = 36 }) => (
-  <svg width={size} height={size * 0.6} viewBox="0 0 100 60" fill="none">
+  <svg width={size * 1.8} height={size} viewBox="0 0 72 40" fill="none">
     <defs>
-      <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stopColor="#ff2db5" />
+      <linearGradient id="pulseGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stopColor="#da009e" />
         <stop offset="50%" stopColor="#a855f7" />
         <stop offset="100%" stopColor="#6cb4ff" />
       </linearGradient>
     </defs>
-    {/* Infinity / double-loop mark approximating the CodSec logo */}
-    <path
-      d="M30 15 C10 15, 5 45, 25 45 C38 45, 42 30, 50 30 C58 30, 62 45, 75 45 C95 45, 90 15, 70 15 C57 15, 53 30, 50 30 C47 30, 43 15, 30 15 Z"
-      stroke="url(#logoGrad)" strokeWidth="6" fill="none" strokeLinecap="round"
+    {/* Pulse / ECG waveform */}
+    <polyline
+      points="0,20 10,20 14,8 18,32 22,14 26,26 30,20 42,20 46,4 50,36 54,20 72,20"
+      stroke="url(#pulseGrad)" strokeWidth="2.5" fill="none"
+      strokeLinecap="round" strokeLinejoin="round"
     />
-    {/* Inner accent dot */}
-    <circle cx="70" cy="26" r="5" fill="url(#logoGrad)" />
+    {/* Accent dot at peak */}
+    <circle cx="46" cy="4" r="2.5" fill="#da009e" />
   </svg>
 );
 
@@ -217,139 +220,23 @@ const chartTooltipStyle = {
 // ── Tab Views ────────────────────────────────────────────────────────
 
 const TABS = [
-  { id: "overview", label: "Overview", icon: Activity },
-  { id: "playbooks", label: "Playbooks", icon: Layers },
-  { id: "cases", label: "Cases", icon: FileSearch },
-  { id: "integrations", label: "Integrations", icon: Link2 },
-  { id: "findings", label: "Findings", icon: AlertTriangle },
+  { id: "overview",     label: "Overview",     icon: Activity },
+  { id: "playbooks",    label: "Playbooks",    icon: Layers },
+  { id: "cases",        label: "Cases",        icon: FileSearch },
+  { id: "connectors",   label: "Connectors",   icon: Plug },
+  { id: "webhooks",     label: "Webhooks",     icon: Webhook },
+  { id: "environments", label: "Environments", icon: Globe },
+  { id: "agents",       label: "Agents",       icon: Bot },
+  { id: "users",        label: "Users",        icon: Users },
+  { id: "instances",    label: "Instances",    icon: Package },
+  { id: "jobs",         label: "Jobs",         icon: Briefcase },
+  { id: "ide",          label: "IDE",          icon: Code },
+  { id: "findings",     label: "Findings",     icon: AlertTriangle },
 ];
-
-// ── Connect Screen ───────────────────────────────────────────────────
-
-function ConnectScreen({ onConnected }) {
-  const [form, setForm] = useState({
-    host: "",
-    app_key: "",
-    bearer_token: "",
-    project_id: "",
-    region: "eu",
-    instance_id: "",
-  });
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [error, setError] = useState("");
-
-  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
-
-  const handleConnect = async () => {
-    if (!form.host.trim() || (!form.app_key.trim() && !form.bearer_token.trim())) {
-      setError("Instance URL and at least one credential (App Key or Bearer Token) are required.");
-      return;
-    }
-    setConnecting(true); setError("");
-    try {
-      await api.connect(form);
-      onConnected();
-    } catch (e) {
-      setError(e.message || "Connection failed.");
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const inp = {
-    width: "100%", background: "rgba(255,255,255,0.04)",
-    border: `1px solid ${theme.border}`, borderRadius: 10,
-    padding: "11px 14px", color: theme.text, fontSize: 13,
-    fontFamily: "inherit", outline: "none", boxSizing: "border-box",
-  };
-
-  const Field = ({ label, name, type = "text", placeholder }) => (
-    <div style={{ marginBottom: 14 }}>
-      <label style={{ display: "block", fontSize: 11, color: theme.textMuted,
-        textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 5 }}>{label}</label>
-      <input style={inp} type={type} placeholder={placeholder}
-        value={form[name]} onChange={set(name)}
-        onKeyDown={e => e.key === "Enter" && handleConnect()} />
-    </div>
-  );
-
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "center",
-      minHeight: "100vh", background: theme.bg, padding: 24,
-    }}>
-      <div style={{
-        background: theme.bgCard, border: `1px solid ${theme.border}`,
-        borderRadius: 20, padding: "36px 32px", width: "100%", maxWidth: 460,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
-          <CodSecLogo size={40} />
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 700,
-              background: theme.gradientText, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-              CODSEC
-            </div>
-            <div style={{ fontSize: 12, color: theme.textMuted }}>SOAR Evaluator</div>
-          </div>
-        </div>
-
-        <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Connect to Chronicle</h2>
-        <p style={{ fontSize: 13, color: theme.textDim, marginBottom: 24, lineHeight: 1.6 }}>
-          Enter your Google SecOps SOAR instance details to load the dashboard.
-        </p>
-
-        <Field label="Instance URL" name="host" placeholder="https://rb.siemplify-soar.com" />
-        <Field label="App Key" name="app_key" type="password" placeholder="Settings → Integrations → API Key" />
-        <Field label="Bearer Token" name="bearer_token" type="password" placeholder="eyJhbGci… (optional if App Key set)" />
-
-        <div style={{ marginBottom: 14 }}>
-          <button onClick={() => setShowAdvanced(v => !v)} style={{
-            background: "none", border: "none", color: theme.textMuted,
-            fontSize: 12, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4,
-          }}>
-            {showAdvanced ? "▾" : "▸"} Advanced (for Cases & Integrations)
-          </button>
-        </div>
-
-        {showAdvanced && (
-          <>
-            <Field label="Project ID" name="project_id" placeholder="806183131932" />
-            <Field label="Region" name="region" placeholder="eu" />
-            <Field label="Instance ID" name="instance_id" placeholder="88c7bc29-b1c1-4dbf-b50a-..." />
-          </>
-        )}
-
-        {error && (
-          <div style={{
-            background: theme.redDim, border: `1px solid ${theme.red}44`,
-            borderRadius: 10, padding: "10px 14px", color: theme.red,
-            fontSize: 13, marginBottom: 16,
-          }}>{error}</div>
-        )}
-
-        <button onClick={handleConnect} disabled={connecting} style={{
-          width: "100%", padding: "13px",
-          background: connecting ? theme.border : theme.accent,
-          color: "#fff", border: "none", borderRadius: 12,
-          fontWeight: 700, fontSize: 14, cursor: connecting ? "default" : "pointer",
-          transition: "background 0.15s",
-        }}>
-          {connecting ? "Connecting…" : "Connect & Load Dashboard"}
-        </button>
-
-        <p style={{ fontSize: 11, color: theme.textMuted, textAlign: "center", marginTop: 14 }}>
-          App Key: Settings → Integrations → API Key · Credentials stored in memory only.
-        </p>
-      </div>
-    </div>
-  );
-}
 
 // ── Main App ─────────────────────────────────────────────────────────
 
 export default function App() {
-  const [connected, setConnected] = useState(false);
   const [tab, setTab] = useState("overview");
   const [data, setData] = useState({});
   const [loading, setLoading] = useState({});
@@ -371,27 +258,26 @@ export default function App() {
   const loadAll = useCallback(() => {
     fetchData("overview", api.overview);
     fetchData("playbooks", api.playbooks);
-    fetchData("integrations", api.integrations);
-    fetchData("findings", api.findings);
     fetchData("cases", () => api.cases(30));
     fetchData("trends", () => api.caseTrends(180));
+    fetchData("connectors", api.connectors);
+    fetchData("webhooks", api.webhooks);
+    fetchData("environments", api.environments);
+    fetchData("agents", api.agents);
+    fetchData("apiKeys", api.apiKeys);
+    fetchData("users", api.users);
+    fetchData("instances", api.instances);
+    fetchData("jobs", api.jobs);
+    fetchData("ide", api.ide);
+    fetchData("findings", api.findings);
   }, [fetchData]);
 
-  const handleConnected = () => { setConnected(true); loadAll(); };
-
-  const handleDisconnect = async () => {
-    await api.disconnect().catch(() => {});
-    setConnected(false);
-    setData({});
-    setErrors({});
-  };
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   const refreshAll = loadAll;
 
   const ov = data.overview || {};
   const anyLoading = Object.values(loading).some(Boolean);
-
-  if (!connected) return <ConnectScreen onConnected={handleConnected} />;
 
   return (
     <div style={{
@@ -411,10 +297,10 @@ export default function App() {
               <span style={{ background: theme.gradientText, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
                 CODSEC
               </span>
-              <span style={{ color: theme.textDim, fontWeight: 400, marginLeft: 8 }}>SOAR Evaluator</span>
+              <span style={{ color: theme.textDim, fontWeight: 400, marginLeft: 8 }}>Pulse</span>
             </h1>
             <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 2 }}>
-              Chronicle Security Operations &middot; Environment Assessment
+              Google Chronicle SOAR Assessment
             </div>
           </div>
         </div>
@@ -426,13 +312,6 @@ export default function App() {
           }}>
             <RefreshCw size={14} className={anyLoading ? "spinning" : ""} />
             Refresh
-          </button>
-          <button onClick={handleDisconnect} style={{
-            display: "flex", alignItems: "center", gap: 6, background: "transparent",
-            border: `1px solid ${theme.borderLight}`, borderRadius: 10, padding: "8px 16px",
-            color: theme.textMuted, cursor: "pointer", fontSize: 12, fontWeight: 500,
-          }}>
-            Disconnect
           </button>
         </div>
       </header>
@@ -530,40 +409,70 @@ export default function App() {
           <>
             {loading.playbooks ? <LoadingState /> : errors.playbooks ? (
               <ErrorState message={errors.playbooks} onRetry={() => fetchData("playbooks", api.playbooks)} />
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <div style={{ marginBottom: 16, fontSize: 13, color: theme.textDim }}>
-                  {(data.playbooks?.playbooks || []).length} playbooks found
-                </div>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                      {["Playbook", "Status", "Category", "Created", "Last Updated"].map(h => (
-                        <th key={h} style={{
-                          textAlign: "left", padding: "12px 14px", color: theme.textMuted,
-                          fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5,
-                        }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data.playbooks?.playbooks || []).map((pb, i) => (
-                      <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                        <td style={{ padding: "14px", fontWeight: 500 }}>{pb.name}</td>
-                        <td style={{ padding: "14px" }}><StatusBadge status={pb.status} /></td>
-                        <td style={{ padding: "14px", color: theme.textDim }}>{pb.category}</td>
-                        <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>
-                          {pb.createTime ? new Date(pb.createTime).toLocaleDateString() : "—"}
-                        </td>
-                        <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>
-                          {pb.updateTime ? new Date(pb.updateTime).toLocaleDateString() : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            ) : (() => {
+              const pbs = data.playbooks?.playbooks || [];
+              const active = pbs.filter(p => p.status === "Active").length;
+              const disabled = pbs.filter(p => p.status === "Disabled").length;
+              const allIntegrations = [...new Set(pbs.flatMap(p => p.integrations || []))].sort();
+              return (
+                <>
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                    <StatCard icon={Layers} label="Total" value={pbs.length} />
+                    <StatCard icon={CheckCircle} label="Active" value={active} color={theme.green} />
+                    <StatCard icon={XCircle} label="Disabled" value={disabled} color={theme.yellow} />
+                    <StatCard icon={Link2} label="Integrations Used" value={allIntegrations.length} color={theme.purple} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 14 }}>
+                    {pbs.map((pb, i) => {
+                      const isActive = pb.status === "Active";
+                      return (
+                        <div key={i} style={{
+                          background: theme.bgCard, border: `1px solid ${theme.border}`,
+                          borderRadius: 16, padding: 20,
+                        }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                            <span style={{
+                              fontSize: 11, padding: "3px 10px", borderRadius: 20, fontWeight: 600,
+                              background: isActive ? theme.greenDim : theme.yellowDim,
+                              color: isActive ? theme.green : theme.yellow,
+                            }}>{pb.status}</span>
+                            <span style={{
+                              fontSize: 11, padding: "3px 10px", borderRadius: 20,
+                              background: `${theme.border}`, color: theme.textMuted,
+                            }}>{pb.playbookType || "Playbook"}</span>
+                          </div>
+                          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>{pb.name}</div>
+                          <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8, fontFamily: "monospace" }}>{pb.category}</div>
+                          {pb.description && (
+                            <p style={{ fontSize: 12, color: theme.textDim, lineHeight: 1.6, marginBottom: 10,
+                              display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                              {pb.description}
+                            </p>
+                          )}
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
+                            {(pb.integrations || []).length === 0
+                              ? <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: "monospace" }}>No integrations detected</span>
+                              : (pb.integrations || []).map(intg => (
+                                <span key={intg} style={{
+                                  fontSize: 11, padding: "2px 9px", borderRadius: 20,
+                                  background: `${theme.border}88`, color: theme.textDim,
+                                  border: `1px solid ${theme.border}`, fontFamily: "monospace",
+                                }}>{intg}</span>
+                              ))
+                            }
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between",
+                            borderTop: `1px solid ${theme.border}44`, paddingTop: 10, fontSize: 11, color: theme.textMuted, fontFamily: "monospace" }}>
+                            <span>{pb.steps || 0} steps</span>
+                            <span>{pb.updateTime ? pb.updateTime.slice(0, 10) : "—"}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
           </>
         )}
 
@@ -618,52 +527,314 @@ export default function App() {
           </>
         )}
 
-        {/* INTEGRATIONS */}
-        {tab === "integrations" && (
+        {/* CONNECTORS */}
+        {tab === "connectors" && (
           <>
-            {loading.integrations ? <LoadingState /> : errors.integrations ? (
-              <ErrorState message={errors.integrations} onRetry={() => fetchData("integrations", api.integrations)} />
+            {loading.connectors ? <LoadingState /> : errors.connectors ? (
+              <ErrorState message={errors.connectors} onRetry={() => fetchData("connectors", api.connectors)} />
             ) : (
               <>
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                  <StatCard icon={Link2} label="Total" value={data.integrations?.total || 0} />
-                  <StatCard icon={CheckCircle} label="Healthy"
-                    value={(data.integrations?.integrations || []).filter(i => i.status === "Healthy").length}
-                    color={theme.green} />
-                  <StatCard icon={AlertTriangle} label="Degraded"
-                    value={(data.integrations?.integrations || []).filter(i => i.status === "Degraded").length}
-                    color={theme.yellow} />
-                  <StatCard icon={XCircle} label="Error"
-                    value={(data.integrations?.integrations || []).filter(i => i.status === "Error").length}
-                    color={theme.red} />
+                  <StatCard icon={Plug} label="Total Connectors" value={data.connectors?.total || 0} />
+                  <StatCard icon={CheckCircle} label="Integrations"
+                    value={Object.keys(data.connectors?.connectors || {}).length} color={theme.green} />
+                </div>
+                {Object.entries(data.connectors?.connectors || {}).map(([integration, cards]) => (
+                  <div key={integration} style={{ marginBottom: 20 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: theme.textDim, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.6 }}>{integration}</div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
+                            {["Connector Name", "Enabled"].map(h => (
+                              <th key={h} style={{ textAlign: "left", padding: "10px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {cards.map((c, i) => (
+                            <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
+                              <td style={{ padding: "12px 14px", fontWeight: 500 }}>{c.name}</td>
+                              <td style={{ padding: "12px 14px" }}>
+                                <span style={{ color: c.isEnabled ? theme.green : theme.textMuted, fontWeight: 500 }}>{c.isEnabled ? "Yes" : "No"}</span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </>
+        )}
+
+        {/* WEBHOOKS */}
+        {tab === "webhooks" && (
+          <>
+            {loading.webhooks ? <LoadingState /> : errors.webhooks ? (
+              <ErrorState message={errors.webhooks} onRetry={() => fetchData("webhooks", api.webhooks)} />
+            ) : (
+              <>
+                <StatCard icon={Webhook} label="Total Webhooks" value={data.webhooks?.total || 0} />
+                <div style={{ overflowX: "auto", marginTop: 20 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
+                        {["Name", "Environment", "Enabled"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.webhooks?.webhooks || []).map((wh, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
+                          <td style={{ padding: "14px", fontWeight: 500 }}>{wh.name || wh.identifier}</td>
+                          <td style={{ padding: "14px", color: theme.textDim }}>{wh.environment || "—"}</td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ color: wh.isEnabled ? theme.green : theme.textMuted, fontWeight: 500 }}>{wh.isEnabled ? "Yes" : "No"}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* ENVIRONMENTS */}
+        {tab === "environments" && (
+          <>
+            {loading.environments ? <LoadingState /> : errors.environments ? (
+              <ErrorState message={errors.environments} onRetry={() => fetchData("environments", api.environments)} />
+            ) : (
+              <>
+                <StatCard icon={Globe} label="Environments" value={data.environments?.total || 0} />
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 20 }}>
+                  {(data.environments?.environments || []).map((env, i) => (
+                    <div key={i} style={{
+                      background: theme.bgCard, border: `1px solid ${theme.border}`,
+                      borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 500,
+                    }}>{env}</div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* AGENTS */}
+        {tab === "agents" && (
+          <>
+            {loading.agents ? <LoadingState /> : errors.agents ? (
+              <ErrorState message={errors.agents} onRetry={() => fetchData("agents", api.agents)} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Bot} label="Total Agents" value={data.agents?.total || 0} />
+                  <StatCard icon={CheckCircle} label="Live"
+                    value={(data.agents?.agents || []).filter(a => a.status === "Live").length} color={theme.green} />
+                  <StatCard icon={XCircle} label="Failed"
+                    value={(data.agents?.agents || []).filter(a => a.status === "Failed").length} color={theme.red} />
                 </div>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
                       <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Integration", "Status", "Type", "Version", "Last Heartbeat", "Enabled"].map(h => (
-                          <th key={h} style={{
-                            textAlign: "left", padding: "12px 14px", color: theme.textMuted,
-                            fontWeight: 600, fontSize: 11, textTransform: "uppercase",
-                          }}>{h}</th>
+                        {["Name", "Status", "Environments"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {(data.integrations?.integrations || []).map((intg, i) => (
+                      {(data.agents?.agents || []).map((a, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
+                          <td style={{ padding: "14px", fontWeight: 500 }}>{a.name}</td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{
+                              color: a.status === "Live" ? theme.green : a.status === "Failed" ? theme.red : theme.yellow,
+                              fontWeight: 500,
+                            }}>{a.status}</span>
+                          </td>
+                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>{(a.environments || []).join(", ") || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* USERS */}
+        {tab === "users" && (
+          <>
+            {loading.users ? <LoadingState /> : errors.users ? (
+              <ErrorState message={errors.users} onRetry={() => fetchData("users", api.users)} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Users} label="Total Users" value={data.users?.total || 0} />
+                  <StatCard icon={XCircle} label="Disabled"
+                    value={(data.users?.users || []).filter(u => u.isDisabled).length} color={theme.red} />
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
+                        {["Email", "Roles", "Provider", "Environments", "Disabled"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.users?.users || []).map((u, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
+                          <td style={{ padding: "14px", fontWeight: 500 }}>{u.email}</td>
+                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>{(u.socRoles || []).join(", ") || "—"}</td>
+                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>{u.providerName || "—"}</td>
+                          <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>{(u.environments || []).join(", ") || "—"}</td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ color: u.isDisabled ? theme.red : theme.green, fontWeight: 500 }}>{u.isDisabled ? "Yes" : "No"}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* INTEGRATION INSTANCES */}
+        {tab === "instances" && (
+          <>
+            {loading.instances ? <LoadingState /> : errors.instances ? (
+              <ErrorState message={errors.instances} onRetry={() => fetchData("instances", api.instances)} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Package} label="Total Instances" value={data.instances?.total || 0} />
+                  <StatCard icon={Bot} label="Remote"
+                    value={(data.instances?.instances || []).filter(i => i.isRemote).length} color={theme.purple} />
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
+                        {["Environment", "Integration Type", "Instance Name", "Remote"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.instances?.instances || []).map((inst, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
+                          <td style={{ padding: "14px", color: theme.textDim }}>{inst.environment}</td>
+                          <td style={{ padding: "14px", fontWeight: 500 }}>{inst.type}</td>
+                          <td style={{ padding: "14px" }}>{inst.name}</td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ color: inst.isRemote ? theme.purple : theme.textMuted, fontWeight: 500 }}>{inst.isRemote ? "Yes" : "No"}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* JOBS */}
+        {tab === "jobs" && (
+          <>
+            {loading.jobs ? <LoadingState /> : errors.jobs ? (
+              <ErrorState message={errors.jobs} onRetry={() => fetchData("jobs", api.jobs)} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Briefcase} label="Total Jobs" value={data.jobs?.total || 0} />
+                  <StatCard icon={CheckCircle} label="Enabled"
+                    value={(data.jobs?.jobs || []).filter(j => j.isEnabled).length} color={theme.green} />
+                  <StatCard icon={Code} label="Custom"
+                    value={(data.jobs?.jobs || []).filter(j => j.isCustom).length} color={theme.purple} />
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
+                        {["Name", "Integration", "Enabled", "Custom"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.jobs?.jobs || []).map((j, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
+                          <td style={{ padding: "14px", fontWeight: 500 }}>{j.name}</td>
+                          <td style={{ padding: "14px", color: theme.textDim }}>{j.integration || "—"}</td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ color: j.isEnabled ? theme.green : theme.textMuted, fontWeight: 500 }}>{j.isEnabled ? "Yes" : "No"}</span>
+                          </td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ color: j.isCustom ? theme.purple : theme.textMuted, fontWeight: 500 }}>{j.isCustom ? "Yes" : "No"}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* IDE */}
+        {tab === "ide" && (
+          <>
+            {loading.ide ? <LoadingState /> : errors.ide ? (
+              <ErrorState message={errors.ide} onRetry={() => fetchData("ide", api.ide)} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Code} label="Integrations" value={data.ide?.total || 0} />
+                  <StatCard icon={Zap} label="Custom"
+                    value={(data.ide?.integrations || []).filter(i => i.isCustom).length} color={theme.purple} />
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
+                        {["Integration", "Custom", "Actions"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(data.ide?.integrations || []).map((intg, i) => (
                         <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
                           <td style={{ padding: "14px", fontWeight: 500 }}>{intg.name}</td>
-                          <td style={{ padding: "14px" }}><StatusBadge status={intg.status} /></td>
-                          <td style={{ padding: "14px", color: theme.textDim }}>{intg.type || "—"}</td>
-                          <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>{intg.version || "—"}</td>
-                          <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>
-                            {intg.lastHeartbeat ? new Date(intg.lastHeartbeat).toLocaleString() : "—"}
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ color: intg.isCustom ? theme.purple : theme.textMuted, fontWeight: 500 }}>{intg.isCustom ? "Yes" : "No"}</span>
                           </td>
-                          <td style={{ padding: "14px", fontSize: 12 }}>
-                            <span style={{
-                              color: intg.isEnabled ? theme.green : theme.textMuted,
-                              fontWeight: 500,
-                            }}>{intg.isEnabled ? "Yes" : "No"}</span>
+                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {(intg.actions || []).slice(0, 8).map((a, j) => (
+                                <span key={j} style={{
+                                  background: theme.border, borderRadius: 6, padding: "2px 8px",
+                                  fontSize: 11, color: theme.textDim,
+                                }}>{a}</span>
+                              ))}
+                              {(intg.actions || []).length > 8 && (
+                                <span style={{ fontSize: 11, color: theme.textMuted }}>+{intg.actions.length - 8} more</span>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
