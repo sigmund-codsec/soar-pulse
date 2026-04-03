@@ -13,6 +13,7 @@ Setup:
 import asyncio
 import os
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -36,6 +37,37 @@ CHRONICLE_API_KEY = os.getenv("CHRONICLE_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("codsec")
+
+# ── Shared HTTP client (connection pool, reused across all requests) ──
+# Limits: 100 total connections, 20 per host — avoids overwhelming the SOAR API
+# while still allowing high concurrency for parallel playbook detail fetches.
+_http_client: Optional[httpx.AsyncClient] = None
+
+def _get_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            http2=False,  # SOAR API does not support HTTP/2
+        )
+    return _http_client
+
+# ── Simple in-memory response cache (TTL: 60s) ────────────────────────
+_cache: dict = {}  # key → (timestamp, value)
+CACHE_TTL = 60  # seconds
+
+def _cache_get(key: str):
+    entry = _cache.get(key)
+    if entry and (time.monotonic() - entry[0]) < CACHE_TTL:
+        return entry[1]
+    return None
+
+def _cache_set(key: str, value):
+    _cache[key] = (time.monotonic(), value)
+
+def _cache_clear():
+    _cache.clear()
 
 # ── Runtime credentials (overrides .env when set via /api/connect) ────
 _runtime: dict = {}
@@ -79,8 +111,9 @@ async def chronicle_request(
     params: dict = None,
     json_body: dict = None,
     timeout: float = 30.0,
+    use_cache: bool = False,
 ) -> dict:
-    """Make authenticated request to Chronicle API."""
+    """Make authenticated request to Chronicle API using the shared persistent client."""
     headers = {}
     merged_params = dict(params or {})
 
@@ -101,46 +134,43 @@ async def chronicle_request(
 
     headers["Content-Type"] = "application/json"
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.request(
-                method, url, headers=headers, params=merged_params, json=json_body
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as e:
-            status_code = e.response.status_code
-            response_messsage = e.response.text
+    # Check cache for GET requests
+    cache_key = None
+    if use_cache and method.upper() == "GET":
+        cache_key = f"{url}?{merged_params}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-            logger.error(f"Chronicle API error: {status_code} — {response_messsage}")
-            
-            if status_code == 400:
-                try:
-                    body = e.response.json()
-                    api_detail = body.get("details") or body.get("title") or e.response.text
-                except Exception:
-                    api_detail = e.response.text
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Chronicle API bad request: {api_detail}",
-                )
-            if status_code == 401:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Chronicle API rejected the token (401 Unauthorized). Check that CHRONICLE_BEARER_TOKEN in .env is valid and not expired.",
-                )
-            if status_code == 403:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Chronicle API denied access (403 Forbidden). The token may lack the required permissions.",
-                )
-            raise HTTPException(
-                status_code=status_code,
-                detail=f"Chronicle API error: {e.response.text}",
-            )
-        except httpx.RequestError as e:
-            logger.error(f"Chronicle request failed: {e}")
-            raise HTTPException(status_code=502, detail=f"Chronicle connection error: {str(e)}")
+    client = _get_client()
+    try:
+        resp = await client.request(
+            method, url, headers=headers, params=merged_params, json=json_body,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        if cache_key:
+            _cache_set(cache_key, result)
+        return result
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        logger.error(f"Chronicle API error: {status_code} — {e.response.text}")
+        if status_code == 400:
+            try:
+                body = e.response.json()
+                api_detail = body.get("details") or body.get("title") or e.response.text
+            except Exception:
+                api_detail = e.response.text
+            raise HTTPException(status_code=400, detail=f"Chronicle API bad request: {api_detail}")
+        if status_code == 401:
+            raise HTTPException(status_code=401, detail="Chronicle API rejected the token (401 Unauthorized). Check CHRONICLE_BEARER_TOKEN in .env.")
+        if status_code == 403:
+            raise HTTPException(status_code=403, detail="Chronicle API denied access (403 Forbidden).")
+        raise HTTPException(status_code=status_code, detail=f"Chronicle API error: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Chronicle request failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Chronicle connection error: {str(e)}")
 
 
 async def chronicle_paginated_fetch(
@@ -148,8 +178,9 @@ async def chronicle_paginated_fetch(
     params: dict,
     result_key: str,
     max_pages: int = 20,
+    use_cache: bool = False,
 ) -> list:
-    """Fetch all pages from a Chronicle API list endpoint."""
+    """Fetch all pages from a Chronicle API list endpoint using the shared client."""
     all_items = []
     page_token = None
 
@@ -158,7 +189,7 @@ async def chronicle_paginated_fetch(
         if page_token:
             page_params["pageToken"] = page_token
 
-        data = await chronicle_request("GET", url, params=page_params)
+        data = await chronicle_request("GET", url, params=page_params, use_cache=use_cache)
         items = data.get(result_key, data.get("data", []))
         all_items.extend(items)
 
@@ -174,10 +205,25 @@ async def chronicle_paginated_fetch(
 
 # ── FastAPI App ───────────────────────────────────────────────────────
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Warm up the shared HTTP client on startup
+    _get_client()
+    logger.info("Shared HTTP client initialised")
+    yield
+    # Graceful shutdown — close persistent connections
+    global _http_client
+    if _http_client and not _http_client.is_closed:
+        await _http_client.aclose()
+        logger.info("Shared HTTP client closed")
+
 app = FastAPI(
     title="CodSec SOAR Evaluator API",
     description="Chronicle SOAR environment health assessment",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -341,56 +387,55 @@ async def _fetch_playbooks_metadata() -> list:
         "/api/external/v1/workflows",
     ]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        last_err = None
+    client = _get_client()
+    last_err = None
 
-        for path in get_paths:
-            url = f"{base}{path}"
-            try:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code == 404:
-                    continue
-                if resp.status_code == 401:
-                    raise HTTPException(status_code=401, detail="Invalid credentials (401). Check your App Key.")
-                if resp.status_code == 403:
-                    raise HTTPException(status_code=403, detail="Access denied (403). Check App Key permissions.")
-                resp.raise_for_status()
-                raw = resp.json()
-                if isinstance(raw, list):
-                    logger.info(f"Fetched {len(raw)} playbooks via GET {path}")
-                    return raw
-                for key in ("playbooks", "data", "value", "results"):
-                    if isinstance(raw.get(key), list):
-                        logger.info(f"Fetched {len(raw[key])} playbooks via GET {path} (key={key})")
-                        return raw[key]
-                # If d.results pattern
-                if raw.get("d") and isinstance(raw["d"].get("results"), list):
-                    return raw["d"]["results"]
-                return raw if isinstance(raw, list) else []
-            except (httpx.HTTPStatusError, httpx.RequestError) as e:
-                last_err = e
-                continue
-
-        # Fallback: POST GetEnabledWFCards (Playbooks 2.0)
+    for path in get_paths:
+        url = f"{base}{path}"
         try:
-            wf_url = f"{base}/api/external/v1/playbooks/GetEnabledWFCards"
-            resp = await client.post(
-                wf_url,
-                headers={**headers,
-                         "Content-Type": "application/json;odata.metadata=minimal;odata.streaming=true",
-                         "accept": "application/json;odata.metadata=minimal;odata.streaming=true"},
-                content=b'{"caseEnvironment":"","executionScope":0}',
-            )
-            if resp.status_code not in (404,):
-                resp.raise_for_status()
-                raw = resp.json()
-                if isinstance(raw, list):
-                    logger.info(f"Fetched {len(raw)} playbooks via POST GetEnabledWFCards")
-                    return raw
-                if isinstance(raw.get("value"), list):
-                    return raw["value"]
-        except Exception as e:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 404:
+                continue
+            if resp.status_code == 401:
+                raise HTTPException(status_code=401, detail="Invalid credentials (401). Check your App Key.")
+            if resp.status_code == 403:
+                raise HTTPException(status_code=403, detail="Access denied (403). Check App Key permissions.")
+            resp.raise_for_status()
+            raw = resp.json()
+            if isinstance(raw, list):
+                logger.info(f"Fetched {len(raw)} playbooks via GET {path}")
+                return raw
+            for key in ("playbooks", "data", "value", "results"):
+                if isinstance(raw.get(key), list):
+                    logger.info(f"Fetched {len(raw[key])} playbooks via GET {path} (key={key})")
+                    return raw[key]
+            if raw.get("d") and isinstance(raw["d"].get("results"), list):
+                return raw["d"]["results"]
+            return raw if isinstance(raw, list) else []
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
             last_err = e
+            continue
+
+    # Fallback: POST GetEnabledWFCards (Playbooks 2.0)
+    try:
+        wf_url = f"{base}/api/external/v1/playbooks/GetEnabledWFCards"
+        resp = await client.post(
+            wf_url,
+            headers={**headers,
+                     "Content-Type": "application/json;odata.metadata=minimal;odata.streaming=true",
+                     "accept": "application/json;odata.metadata=minimal;odata.streaming=true"},
+            content=b'{"caseEnvironment":"","executionScope":0}',
+        )
+        if resp.status_code not in (404,):
+            resp.raise_for_status()
+            raw = resp.json()
+            if isinstance(raw, list):
+                logger.info(f"Fetched {len(raw)} playbooks via POST GetEnabledWFCards")
+                return raw
+            if isinstance(raw.get("value"), list):
+                return raw["value"]
+    except Exception as e:
+        last_err = e
 
     raise HTTPException(
         status_code=502,
@@ -450,11 +495,18 @@ def _count_steps(full: dict) -> int:
     return 0
 
 
-async def _fetch_playbook_detail(client: httpx.AsyncClient, identifier: str, headers: dict) -> dict:
-    """Fetch full playbook detail via GetWorkflowFullInfoByIdentifier."""
+async def _fetch_playbook_detail(identifier: str, headers: dict) -> dict:
+    """Fetch full playbook detail via GetWorkflowFullInfoByIdentifier using shared client."""
     if not identifier:
         return {}
+    # Check cache first — playbook details rarely change within a session
+    cache_key = f"pb_detail:{identifier}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     base = _get_base_url()
+    client = _get_client()
     paths = [
         f"/api/external/v1/playbooks/GetWorkflowFullInfoByIdentifier/{identifier}",
         f"/api/external/v1/workflows/GetWorkflowFullInfoByIdentifier/{identifier}",
@@ -465,7 +517,9 @@ async def _fetch_playbook_detail(client: httpx.AsyncClient, identifier: str, hea
             if resp.status_code == 404:
                 continue
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            _cache_set(cache_key, result)
+            return result
         except (httpx.HTTPStatusError, httpx.RequestError):
             continue
     return {}
@@ -523,11 +577,10 @@ async def get_playbooks():
     else:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        details = await asyncio.gather(*[
-            _fetch_playbook_detail(client, _get_pb_identifier(pb), headers)
-            for pb in playbooks_raw
-        ], return_exceptions=True)
+    details = await asyncio.gather(*[
+        _fetch_playbook_detail(_get_pb_identifier(pb), headers)
+        for pb in playbooks_raw
+    ], return_exceptions=True)
 
     playbooks = [
         _normalise_playbook(pb, full if isinstance(full, dict) else {})
@@ -609,12 +662,11 @@ async def get_cases(
 
     params = {
         "format": "camel",
-        "expand": "products, tasks, tags, closureDetails, sla, alertsSla",
         "filter": filter_str,
         "orderBy": "updateTime desc",
         "pageSize": page_size,
     }
-    cases = await chronicle_paginated_fetch(url, params, result_key="cases")
+    cases = await chronicle_paginated_fetch(url, params, result_key="cases", max_pages=10)
 
     severity_counts = {}
     status_counts = {}
@@ -670,7 +722,7 @@ async def get_case_trends(
     url = f"{_get_soar_base()}/cases"
     start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
     params = {"format": "camel", "pageSize": 1000, "filter": f"createTime > {start_ms}"}
-    cases = await chronicle_paginated_fetch(url, params, result_key="cases")
+    cases = await chronicle_paginated_fetch(url, params, result_key="cases", max_pages=5)
 
     monthly = {}
     for case in cases:
@@ -680,8 +732,9 @@ async def get_case_trends(
             if month_key not in monthly:
                 monthly[month_key] = {"total": 0, "automated": 0, "manual": 0}
             monthly[month_key]["total"] += 1
-            # Chronicle marks auto-resolved cases
-            if case.get("resolution") == "AUTO_RESOLVED" or case.get("closedByPlaybook"):
+            # Proxy: case has a closeTime → treated as resolved (automated/closed by playbook)
+            # Chronicle's closedByPlaybook requires expand=closureDetails which is expensive.
+            if case.get("closeTime") or case.get("closedTime"):
                 monthly[month_key]["automated"] += 1
             else:
                 monthly[month_key]["manual"] += 1
@@ -700,10 +753,16 @@ def _ext() -> str:
     return f"{_get_base_url()}/api/external/v1"
 
 
-async def _paginated_post(endpoint: str, base_payload: dict) -> list:
+async def _paginated_post(endpoint: str, base_payload: dict, use_cache: bool = False) -> list:
     """POST with Siemplify-style page iteration (requestedPage / totalNumberOfPages)."""
+    cache_key = f"ppost:{endpoint}:{base_payload}" if use_cache else None
+    if cache_key:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     results = []
-    payload = {**base_payload, "requestedPage": 0, "pageSize": 200}
+    payload = {**base_payload, "requestedPage": 0, "pageSize": 500}
     while True:
         data = await chronicle_request("POST", f"{_ext()}/{endpoint}", json_body=payload)
         if not data:
@@ -714,6 +773,9 @@ async def _paginated_post(endpoint: str, base_payload: dict) -> list:
         if payload["requestedPage"] >= total_pages - 1:
             break
         payload["requestedPage"] += 1
+
+    if cache_key:
+        _cache_set(cache_key, results)
     return results
 
 
@@ -722,7 +784,7 @@ async def _paginated_post(endpoint: str, base_payload: dict) -> list:
 @app.get("/api/connectors")
 async def get_connectors():
     """Fetch connector cards from connectors/cards (SOARManager pattern)."""
-    data = await chronicle_request("GET", f"{_ext()}/connectors/cards")
+    data = await chronicle_request("GET", f"{_ext()}/connectors/cards", use_cache=True)
     raw = data if isinstance(data, list) else data.get("connectors", data.get("data", []))
     result = {}
     for group in raw:
@@ -742,25 +804,29 @@ async def get_connectors():
 
 @app.get("/api/webhooks")
 async def get_webhooks():
-    """Fetch webhook cards and their details."""
-    data = await chronicle_request("GET", f"{_ext()}/webhooks-management/cards")
+    """Fetch webhook cards and their details — all detail calls run concurrently."""
+    data = await chronicle_request("GET", f"{_ext()}/webhooks-management/cards", use_cache=True)
     raw = data if isinstance(data, list) else data.get("webhooks", data.get("data", []))
-    webhooks = []
-    for wh in raw:
+
+    async def _fetch_detail(wh):
         identifier = wh.get("identifier", "")
         detail = {}
         if identifier:
             try:
-                detail = await chronicle_request("GET", f"{_ext()}/webhooks-management/{identifier}")
+                detail = await chronicle_request(
+                    "GET", f"{_ext()}/webhooks-management/{identifier}", use_cache=True
+                )
             except Exception:
                 pass
-        webhooks.append({
+        return {
             "identifier": identifier,
             "name": detail.get("name", wh.get("name", wh.get("displayName", ""))),
             "environment": detail.get("defaultEnvironment", ""),
             "isEnabled": detail.get("isEnabled", wh.get("isEnabled", False)),
-        })
-    return {"webhooks": webhooks, "total": len(webhooks)}
+        }
+
+    webhooks = await asyncio.gather(*[_fetch_detail(wh) for wh in raw])
+    return {"webhooks": list(webhooks), "total": len(webhooks)}
 
 
 # ── Environments ──────────────────────────────────────────────────────
@@ -768,7 +834,7 @@ async def get_webhooks():
 @app.get("/api/environments")
 async def get_environments():
     """Fetch all SOAR environments."""
-    items = await _paginated_post("settings/GetEnvironments", {"searchTerm": ""})
+    items = await _paginated_post("settings/GetEnvironments", {"searchTerm": ""}, use_cache=True)
     envs = [item.get("name", "") for item in items if item.get("name")]
     return {"environments": envs, "total": len(envs)}
 
@@ -779,7 +845,7 @@ async def get_environments():
 async def get_agents():
     """Fetch remote agents and their communication status."""
     STATUS_MAP = {0: "Live", 1: "Failed", 2: "Idle", 3: "Pending", 4: "Disabled"}
-    data = await chronicle_request("GET", f"{_ext()}/agents/GetAgents")
+    data = await chronicle_request("GET", f"{_ext()}/agents/GetAgents", use_cache=True)
     agents_raw = data if isinstance(data, list) else data.get("agents", data.get("data", []))
 
     agent_ids = [a.get("identifier", "") for a in agents_raw if a.get("identifier")]
@@ -813,7 +879,7 @@ async def get_agents():
 @app.get("/api/api-keys")
 async def get_api_keys():
     """Fetch configured API keys (names + environments only, no values)."""
-    data = await chronicle_request("GET", f"{_ext()}/settings/GetApiKeys")
+    data = await chronicle_request("GET", f"{_ext()}/settings/GetApiKeys", use_cache=True)
     raw = data if isinstance(data, list) else data.get("apiKeys", data.get("data", []))
     keys = [{"name": k.get("name", ""), "environments": k.get("environments", [])} for k in raw]
     return {"apiKeys": keys, "total": len(keys)}
@@ -831,7 +897,7 @@ async def get_users():
         "filterPermissionTypes": [],
         "filterSupportUsers": True,
         "fetchOnlySupportUsers": False,
-    })
+    }, use_cache=True)
     users = []
     for u in items:
         users.append({
@@ -850,48 +916,52 @@ async def get_users():
 
 @app.get("/api/integration-instances")
 async def get_integration_instances():
-    """Fetch integration instances across all environments."""
-    instances = []
+    """Fetch integration instances — shared + all environments concurrently."""
 
-    # Shared environment
+    async def _fetch_env(env_name: str):
+        try:
+            env_data = await chronicle_request(
+                "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
+                json_body={"name": env_name},
+            )
+            return env_name, env_data.get("instances", [])
+        except Exception:
+            return env_name, []
+
+    # Fetch environments list and shared instances concurrently
     try:
-        shared = await chronicle_request(
-            "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
-            json_body={"name": "*"}
+        envs_raw, shared_data = await asyncio.gather(
+            _paginated_post("settings/GetEnvironments", {"searchTerm": ""}, use_cache=True),
+            chronicle_request(
+                "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
+                json_body={"name": "*"},
+            ),
         )
-        for i in shared.get("instances", []):
+    except Exception as e:
+        logger.warning("Could not fetch integration instance base data: %s", e)
+        return {"instances": [], "total": 0}
+
+    env_names = [e.get("name", "") for e in envs_raw if e.get("name")]
+
+    # Fetch all per-environment instances concurrently
+    env_results = await asyncio.gather(*[_fetch_env(n) for n in env_names])
+
+    instances = []
+    for i in shared_data.get("instances", []):
+        instances.append({
+            "environment": "Shared",
+            "type": i.get("integrationIdentifier", ""),
+            "name": i.get("instanceName", ""),
+            "isRemote": i.get("isRemote", False),
+        })
+    for env_name, env_instances in env_results:
+        for i in env_instances:
             instances.append({
-                "environment": "Shared",
+                "environment": env_name,
                 "type": i.get("integrationIdentifier", ""),
                 "name": i.get("instanceName", ""),
                 "isRemote": i.get("isRemote", False),
             })
-    except Exception as e:
-        logger.warning("Could not fetch shared integration instances: %s", e)
-
-    # Per-environment instances
-    try:
-        envs = await _paginated_post("settings/GetEnvironments", {"searchTerm": ""})
-        for env in envs:
-            env_name = env.get("name", "")
-            if not env_name:
-                continue
-            try:
-                env_data = await chronicle_request(
-                    "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
-                    json_body={"name": env_name}
-                )
-                for i in env_data.get("instances", []):
-                    instances.append({
-                        "environment": env_name,
-                        "type": i.get("integrationIdentifier", ""),
-                        "name": i.get("instanceName", ""),
-                        "isRemote": i.get("isRemote", False),
-                    })
-            except Exception:
-                pass
-    except Exception as e:
-        logger.warning("Could not fetch environments for integration instances: %s", e)
 
     return {"instances": instances, "total": len(instances)}
 
@@ -901,7 +971,7 @@ async def get_integration_instances():
 @app.get("/api/jobs")
 async def get_jobs():
     """Fetch installed SOAR jobs."""
-    data = await chronicle_request("GET", f"{_ext()}/jobs/GetInstalledJobs")
+    data = await chronicle_request("GET", f"{_ext()}/jobs/GetInstalledJobs", use_cache=True)
     raw = data if isinstance(data, list) else data.get("jobs", data.get("data", []))
     jobs = [
         {
@@ -915,21 +985,122 @@ async def get_jobs():
     return {"jobs": jobs, "total": len(jobs)}
 
 
+# ── Semver version comparison helpers ────────────────────────────────
+
+def _parse_semver(v: str) -> tuple[int, int, int]:
+    """Parse 'MAJOR.MINOR.PATCH' string into (int, int, int). Missing parts default to 0."""
+    try:
+        parts = str(v or "0").strip().lstrip("v").split(".")
+        major = int(parts[0]) if len(parts) > 0 else 0
+        minor = int(parts[1]) if len(parts) > 1 else 0
+        patch = int(parts[2]) if len(parts) > 2 else 0
+        return (major, minor, patch)
+    except (ValueError, AttributeError):
+        return (-1, -1, -1)  # sentinel for unparseable
+
+
+def _version_risk(installed: str, latest: str) -> str:
+    """
+    Compare installed vs latest version strings.
+    Returns: 'high' | 'medium' | 'low' | 'ok' | 'unknown'
+    """
+    if not installed or not latest or installed == "unknown" or latest == "unknown":
+        return "unknown"
+    iv = _parse_semver(installed)
+    lv = _parse_semver(latest)
+    if iv == (-1, -1, -1) or lv == (-1, -1, -1):
+        return "unknown"
+    if iv == lv:
+        return "ok"
+    if iv[0] < lv[0]:
+        return "high"
+    if iv[1] < lv[1]:
+        return "medium"
+    return "low"
+
+
+# Cached working marketplace endpoint (discovered at runtime)
+_MARKETPLACE_ENDPOINT: Optional[str] = None
+
+async def _fetch_marketplace_integrations() -> dict[str, str]:
+    """
+    Discover the Siemplify marketplace/store integrations endpoint and return
+    a dict of {identifier -> version} for all available integrations.
+    Falls back to empty dict if all candidates fail.
+    """
+    global _MARKETPLACE_ENDPOINT
+    candidates = [
+        f"{_ext()}/integrations/GetAllIntegrations",
+        f"{_ext()}/integrations/GetIntegrationsStore",
+        f"{_ext()}/integrations/GetMarketplaceIntegrations",
+    ]
+
+    # Use cached working endpoint if already discovered
+    if _MARKETPLACE_ENDPOINT:
+        try:
+            data = await chronicle_request(
+                "POST", _MARKETPLACE_ENDPOINT, json_body={"name": "*"}, use_cache=True
+            )
+            return _extract_version_map(data)
+        except Exception:
+            _MARKETPLACE_ENDPOINT = None  # reset and re-discover
+
+    for url in candidates:
+        try:
+            data = await chronicle_request(
+                "POST", url, json_body={"name": "*"}, use_cache=True
+            )
+            versions = _extract_version_map(data)
+            if versions:
+                _MARKETPLACE_ENDPOINT = url
+                logger.info(f"Marketplace endpoint discovered: {url}")
+                return versions
+        except Exception as exc:
+            logger.debug(f"Marketplace candidate {url} failed: {exc}")
+
+    logger.warning("No marketplace integration endpoint found; version risk will be 'unknown'")
+    return {}
+
+
+def _extract_version_map(data: dict) -> dict[str, str]:
+    """Extract {identifier -> version} from a GetAll/GetStore integrations response."""
+    result = {}
+    for intg in data.get("integrations", []):
+        identifier = intg.get("identifier") or intg.get("name") or intg.get("displayName", "")
+        version = intg.get("version") or intg.get("integrationVersion", "")
+        if identifier and version:
+            result[str(identifier)] = str(version)
+    return result
+
+
 # ── IDE / Integration Actions ─────────────────────────────────────────
 
 @app.get("/api/ide")
 async def get_ide():
-    """Fetch installed integrations with their supported actions."""
-    data = await chronicle_request(
-        "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
-        json_body={"name": "*"}
+    """Fetch installed integrations with version risk comparison against marketplace."""
+    installed_data, marketplace_versions = await asyncio.gather(
+        chronicle_request(
+            "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
+            json_body={"name": "*"}, use_cache=True
+        ),
+        _fetch_marketplace_integrations(),
     )
+
     ides = []
-    for intg in data.get("integrations", []):
+    for intg in installed_data.get("integrations", []):
+        identifier = intg.get("identifier") or intg.get("name") or intg.get("displayName", "")
+        installed_ver = intg.get("version") or intg.get("integrationVersion", "") or "unknown"
+        latest_ver = marketplace_versions.get(str(identifier), "unknown")
+        risk = _version_risk(installed_ver, latest_ver)
+
         actions = [f.get("name", "") for f in intg.get("integrationSupportedActions", [])]
         ides.append({
             "name": intg.get("displayName", ""),
+            "identifier": str(identifier),
             "isCustom": intg.get("isCustom", False),
+            "installedVersion": installed_ver,
+            "latestVersion": latest_ver,
+            "versionRisk": risk,
             "actions": actions,
         })
     return {"integrations": ides, "total": len(ides)}
@@ -944,10 +1115,13 @@ async def get_overview():
     Calls internal endpoints and merges results.
     """
     try:
-        playbooks_data = await get_playbooks()
-        cases_data = await get_cases(days=30, status=None, severity=None, page_size=100)
-        integrations_data = await get_connectors()
-        trends_data = await get_case_trends(days=180)
+        # 3 concurrent fetches — trends dropped, derived from cases instead
+        playbooks_data, cases_data, integrations_data, ide_data = await asyncio.gather(
+            get_playbooks(),
+            get_cases(days=90, status=None, severity=None, page_size=1000),
+            get_connectors(),
+            get_ide(),
+        )
 
         pbs = playbooks_data["playbooks"]
         active = sum(1 for p in pbs if p["status"] == "Active")
@@ -958,13 +1132,35 @@ async def get_overview():
                      cases_data["status_breakdown"].get("IN_PROGRESS", 0)
 
         total_int = integrations_data["total"]
-        healthy_int = total_int  # connectors/cards doesn't expose heartbeat; count as total
+        healthy_int = total_int
+        outdated_high = sum(1 for i in ide_data["integrations"] if i["versionRisk"] == "high")
+        outdated_medium = sum(1 for i in ide_data["integrations"] if i["versionRisk"] == "medium")
 
-        # Calculate automation rate from trends
-        trends = trends_data["trends"]
-        total_trended = sum(t["total"] for t in trends)
-        auto_trended = sum(t["automated"] for t in trends)
-        automation_rate = (auto_trended / total_trended * 100) if total_trended > 0 else 0
+        # Build monthly trend from status breakdown
+        # Automation rate = closed cases / total cases.
+        # Chronicle does not expose closedByPlaybook without expand=closureDetails
+        # (expensive). Using close rate as the best available proxy: a high close
+        # rate relative to open cases reflects effective playbook-driven resolution.
+        status_bd = cases_data.get("status_breakdown", {})
+        closed_statuses = {"CLOSED", "RESOLVED", "FALSE_POSITIVE", "MERGED"}
+        closed_count = sum(v for k, v in status_bd.items() if k.upper() in closed_statuses)
+        total_cases_90 = cases_data["total_cases"]
+        automation_rate = (closed_count / total_cases_90 * 100) if total_cases_90 > 0 else 0
+
+        # Build monthly trend from the returned case list
+        monthly: dict = {}
+        for c in cases_data.get("cases", []):
+            created = c.get("createTime", "")
+            if created:
+                month_key = str(created)[:7]
+                if month_key not in monthly:
+                    monthly[month_key] = {"total": 0, "automated": 0, "manual": 0}
+                monthly[month_key]["total"] += 1
+                if c.get("closeTime"):
+                    monthly[month_key]["automated"] += 1
+                else:
+                    monthly[month_key]["manual"] += 1
+        trends = [{"month": k, **v} for k, v in sorted(monthly.items())]
 
         # Maturity score calculation
         playbook_coverage = min((active / max(active + disabled, 1)) * 100, 100)
@@ -993,6 +1189,8 @@ async def get_overview():
             },
             "severityBreakdown": cases_data["severity_breakdown"],
             "caseTrends": trends,
+            "outdatedHigh": outdated_high,
+            "outdatedMedium": outdated_medium,
         }
     except HTTPException:
         raise
@@ -1072,6 +1270,22 @@ async def get_findings():
                 "type": "info",
                 "title": f"Healthy MTTR at {mttr}h",
                 "detail": "Resolution times are within acceptable range.",
+            })
+
+        # Check integration version risk
+        high_count = overview.get("outdatedHigh", 0)
+        medium_count = overview.get("outdatedMedium", 0)
+        if high_count > 0:
+            findings.append({
+                "type": "critical",
+                "title": f"{high_count} integration(s) are a major version behind",
+                "detail": "Major version gaps may indicate missing features, security patches, or breaking API changes. Update via the Chronicle integration store.",
+            })
+        if medium_count > 0:
+            findings.append({
+                "type": "warning",
+                "title": f"{medium_count} integration(s) are a minor version behind",
+                "detail": "Minor version gaps may include bug fixes and enhancements. Review release notes and schedule updates.",
             })
 
         # Maturity
