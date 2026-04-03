@@ -1,19 +1,11 @@
 /**
- * CodSec Chronicle SOAR Evaluator — React Frontend
- * ==================================================
- * Setup:
- *   npm create vite@latest codsec-frontend -- --template react
- *   cd codsec-frontend
- *   npm install recharts lucide-react
- *   Replace src/App.jsx with this file
- *   Replace src/App.css with the provided CSS
- *   npm run dev
+ * CodSec Chronicle SOAR Evaluator — React Frontend v3
  */
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
-  AreaChart, Area, PieChart, Pie,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  AreaChart, Area,
 } from "recharts";
 import {
   Shield, Activity, AlertTriangle, CheckCircle, XCircle, Clock,
@@ -41,7 +33,6 @@ async function apiFetch(endpoint, params = {}) {
 const api = {
   overview: () => apiFetch("/api/overview"),
   playbooks: () => apiFetch("/api/playbooks"),
-  playbookRuns: (id, days) => apiFetch(`/api/playbooks/${id}/runs`, { days }),
   cases: (days, status, severity) => apiFetch("/api/cases", { days, status, severity }),
   caseTrends: (days) => apiFetch("/api/cases/trends", { days }),
   connectors: () => apiFetch("/api/connectors"),
@@ -56,18 +47,16 @@ const api = {
   findings: () => apiFetch("/api/findings"),
 };
 
-// ── CodSec Brand Colors ──────────────────────────────────────────────
+// ── Theme ─────────────────────────────────────────────────────────────
 
 const theme = {
-  bg: "#0a0212",         // deep dark purple-black
-  bgCard: "#180433",     // card background
-  bgCardHover: "#220845",
+  bg: "#0a0212",
+  bgCard: "#180433",
   border: "#2e0a5c",
-  borderLight: "#3e0259",
   text: "#ffffff",
   textDim: "#a78bbf",
   textMuted: "#6b4f8a",
-  accent: "#da009e",     // primary CodSec pink
+  accent: "#da009e",
   accentGlow: "rgba(218, 0, 158, 0.3)",
   gradient: "linear-gradient(135deg, #da009e 0%, #8b5cf6 50%, #4f8ff7 100%)",
   gradientText: "linear-gradient(135deg, #ff2db5 0%, #a855f7 50%, #6cb4ff 100%)",
@@ -80,7 +69,7 @@ const theme = {
   purple: "#a78bfa",
 };
 
-// ── Logo Component ───────────────────────────────────────────────────
+// ── Logo ─────────────────────────────────────────────────────────────
 
 const CodSecLogo = ({ size = 36 }) => (
   <svg width={size * 1.8} height={size} viewBox="0 0 72 40" fill="none">
@@ -91,18 +80,13 @@ const CodSecLogo = ({ size = 36 }) => (
         <stop offset="100%" stopColor="#6cb4ff" />
       </linearGradient>
     </defs>
-    {/* Pulse / ECG waveform */}
-    <polyline
-      points="0,20 10,20 14,8 18,32 22,14 26,26 30,20 42,20 46,4 50,36 54,20 72,20"
-      stroke="url(#pulseGrad)" strokeWidth="2.5" fill="none"
-      strokeLinecap="round" strokeLinejoin="round"
-    />
-    {/* Accent dot at peak */}
+    <polyline points="0,20 10,20 14,8 18,32 22,14 26,26 30,20 42,20 46,4 50,36 54,20 72,20"
+      stroke="url(#pulseGrad)" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
     <circle cx="46" cy="4" r="2.5" fill="#da009e" />
   </svg>
 );
 
-// ── Shared UI Components ─────────────────────────────────────────────
+// ── Shared UI ─────────────────────────────────────────────────────────
 
 const StatCard = ({ icon: Icon, label, value, sub, color, glow }) => (
   <div style={{
@@ -123,21 +107,6 @@ const StatCard = ({ icon: Icon, label, value, sub, color, glow }) => (
     {sub && <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 6 }}>{sub}</div>}
   </div>
 );
-
-const Badge = ({ children, color, bg }) => (
-  <span style={{
-    fontSize: 11, fontWeight: 600, color, background: bg,
-    padding: "3px 12px", borderRadius: 20, whiteSpace: "nowrap",
-  }}>{children}</span>
-);
-
-const StatusBadge = ({ status }) => {
-  const c = status === "Healthy" || status === "Active" ? theme.green
-    : status === "Degraded" || status === "Disabled" ? theme.yellow : theme.red;
-  const bg = status === "Healthy" || status === "Active" ? theme.greenDim
-    : status === "Degraded" || status === "Disabled" ? theme.yellowDim : theme.redDim;
-  return <Badge color={c} bg={bg}>{status}</Badge>;
-};
 
 const SeverityDot = ({ severity }) => {
   const c = severity === "CRITICAL" ? theme.red : severity === "HIGH" ? "#fb923c"
@@ -179,21 +148,12 @@ const ScoreRing = ({ score, size = 130 }) => {
       <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="url(#ringGrad)" strokeWidth={9}
         strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
         transform={`rotate(-90 ${size/2} ${size/2})`}
-        style={{ transition: "stroke-dashoffset 0.8s ease" }}
-      />
+        style={{ transition: "stroke-dashoffset 0.8s ease" }} />
       <text x={size/2} y={size/2-4} textAnchor="middle" fill={theme.text} fontSize={32} fontWeight={700}>{score}</text>
       <text x={size/2} y={size/2+18} textAnchor="middle" fill={theme.textMuted} fontSize={12}>/100</text>
     </svg>
   );
 };
-
-const LoadingState = () => (
-  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 60, gap: 14 }}>
-    <Loader2 size={32} color={theme.accent} style={{ animation: "spin 1s linear infinite" }} />
-    <span style={{ color: theme.textDim, fontSize: 14 }}>Connecting to Chronicle SOAR...</span>
-    <style>{`@keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }`}</style>
-  </div>
-);
 
 const ErrorState = ({ message, onRetry }) => (
   <div style={{
@@ -217,7 +177,235 @@ const chartTooltipStyle = {
   labelStyle: { color: theme.textDim },
 };
 
-// ── Tab Views ────────────────────────────────────────────────────────
+// ── Loading Progress Bar ──────────────────────────────────────────────
+
+function LoadingBar({ keys, loading }) {
+  const total = keys.length;
+  const done = keys.filter(k => loading[k] === false).length;
+  // only show while at least one is loading
+  const anyLoading = keys.some(k => loading[k] === true);
+  const pct = total === 0 ? 100 : Math.round((done / total) * 100);
+
+  if (!anyLoading && pct === 100) return null;
+
+  return (
+    <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999, height: 3 }}>
+      <div style={{
+        height: "100%",
+        width: `${pct}%`,
+        background: theme.gradient,
+        transition: "width 0.4s ease",
+        boxShadow: `0 0 8px ${theme.accentGlow}`,
+      }} />
+    </div>
+  );
+}
+
+// ── Generic DataTable ─────────────────────────────────────────────────
+
+const PAGE_SIZE = 25;
+
+function SortIcon({ col, sortCol, sortDir }) {
+  if (sortCol !== col) return <span style={{ opacity: 0.25, fontSize: 10 }}> ↕</span>;
+  return <span style={{ fontSize: 10, color: theme.accent }}> {sortDir === "asc" ? "↑" : "↓"}</span>;
+}
+
+function pageBtnStyle(disabled) {
+  return {
+    padding: "5px 10px", borderRadius: 6, border: `1px solid ${theme.border}`,
+    background: "transparent", color: disabled ? theme.border : theme.textMuted,
+    cursor: disabled ? "default" : "pointer", fontSize: 13, lineHeight: 1,
+    opacity: disabled ? 0.4 : 1,
+  };
+}
+
+function Pagination({ page, totalPages, setPage }) {
+  const safe = Math.min(page, totalPages);
+  const nums = Array.from({ length: Math.min(7, totalPages) }, (_, i) => {
+    if (totalPages <= 7) return i + 1;
+    if (safe <= 4) return i + 1;
+    if (safe >= totalPages - 3) return totalPages - 6 + i;
+    return safe - 3 + i;
+  });
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <button onClick={() => setPage(1)} disabled={safe === 1} style={pageBtnStyle(safe === 1)}>«</button>
+      <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={safe === 1} style={pageBtnStyle(safe === 1)}>‹</button>
+      {nums.map(p => (
+        <button key={p} onClick={() => setPage(p)} style={{
+          ...pageBtnStyle(false),
+          background: safe === p ? theme.accent : "transparent",
+          color: safe === p ? "#fff" : theme.textMuted,
+          border: `1px solid ${safe === p ? theme.accent : theme.border}`,
+        }}>{p}</button>
+      ))}
+      <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={safe === totalPages} style={pageBtnStyle(safe === totalPages)}>›</button>
+      <button onClick={() => setPage(totalPages)} disabled={safe === totalPages} style={pageBtnStyle(safe === totalPages)}>»</button>
+    </div>
+  );
+}
+
+/**
+ * DataTable — generic sortable paginated table.
+ *
+ * columns: [{ key, label, render?, numeric?, noSort? }]
+ * rows: array of objects
+ * searchKeys: keys to match against search string
+ * filters: [{ label, key, values: ["All", ...] }]  — optional
+ * statsBar: JSX node rendered above filters
+ */
+function DataTable({ columns, rows, searchKeys = [], filters = [], statsBar, emptyMsg = "No results." }) {
+  const [sortCol, setSortCol] = useState(columns[0]?.key || "");
+  const [sortDir, setSortDir] = useState("asc");
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [filterVals, setFilterVals] = useState(() =>
+    Object.fromEntries(filters.map(f => [f.key, "All"]))
+  );
+
+  const filtered = useMemo(() => {
+    let r = rows;
+    for (const f of filters) {
+      if (filterVals[f.key] !== "All") r = r.filter(row => String(row[f.key]) === filterVals[f.key]);
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      r = r.filter(row => searchKeys.some(k => String(row[k] ?? "").toLowerCase().includes(q)));
+    }
+    const col = columns.find(c => c.key === sortCol);
+    return [...r].sort((a, b) => {
+      let av = col?.getValue ? col.getValue(a) : (a[sortCol] ?? "");
+      let bv = col?.getValue ? col.getValue(b) : (b[sortCol] ?? "");
+      if (typeof av === "number" && typeof bv === "number")
+        return sortDir === "asc" ? av - bv : bv - av;
+      return sortDir === "asc"
+        ? String(av).localeCompare(String(bv))
+        : String(bv).localeCompare(String(av));
+    });
+  }, [rows, sortCol, sortDir, search, filterVals, filters, searchKeys, columns]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  const handleSort = (key) => {
+    if (sortCol === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(key); setSortDir("asc"); }
+    setPage(1);
+  };
+
+  const thS = (key, noSort) => ({
+    padding: "10px 14px", textAlign: "left", fontSize: 12, fontWeight: 600,
+    color: theme.textMuted, cursor: noSort ? "default" : "pointer", userSelect: "none",
+    borderBottom: `1px solid ${theme.border}`,
+    background: !noSort && sortCol === key ? `${theme.border}55` : "transparent",
+    whiteSpace: "nowrap",
+  });
+
+  const tdS = { padding: "10px 14px", fontSize: 13, borderBottom: `1px solid ${theme.border}22`, verticalAlign: "middle" };
+
+  return (
+    <>
+      {statsBar && <div style={{ marginBottom: 20 }}>{statsBar}</div>}
+
+      {/* Filters row */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}>
+        {searchKeys.length > 0 && (
+          <input
+            placeholder="Search…"
+            value={search}
+            onChange={e => { setSearch(e.target.value); setPage(1); }}
+            style={{
+              flex: "1 1 200px", padding: "7px 12px", borderRadius: 8,
+              border: `1px solid ${theme.border}`, background: theme.bgCard,
+              color: theme.text, fontSize: 13, outline: "none",
+            }}
+          />
+        )}
+        {filters.map(f => (
+          <div key={f.key} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <span style={{ fontSize: 11, color: theme.textMuted, marginRight: 2 }}>{f.label}:</span>
+            {f.values.map(v => (
+              <button key={v} onClick={() => { setFilterVals(prev => ({ ...prev, [f.key]: v })); setPage(1); }} style={{
+                padding: "5px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: `1px solid ${filterVals[f.key] === v ? theme.accent : theme.border}`,
+                background: filterVals[f.key] === v ? `${theme.accent}22` : theme.bgCard,
+                color: filterVals[f.key] === v ? theme.accent : theme.textMuted,
+              }}>{v}</button>
+            ))}
+          </div>
+        ))}
+        <span style={{ marginLeft: "auto", fontSize: 12, color: theme.textMuted }}>
+          {filtered.length} result{filtered.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {/* Table */}
+      <div style={{ background: theme.bgCard, border: `1px solid ${theme.border}`, borderRadius: 14, overflow: "hidden" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {columns.map(col => (
+                  <th key={col.key} style={thS(col.key, col.noSort)} onClick={() => !col.noSort && handleSort(col.key)}>
+                    {col.label}{!col.noSort && <SortIcon col={col.key} sortCol={sortCol} sortDir={sortDir} />}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {pageRows.length === 0 ? (
+                <tr><td colSpan={columns.length} style={{ ...tdS, textAlign: "center", color: theme.textMuted, padding: 32 }}>
+                  {emptyMsg}
+                </td></tr>
+              ) : pageRows.map((row, i) => (
+                <tr key={row._key || i}
+                  style={{ transition: "background 0.1s" }}
+                  onMouseEnter={e => e.currentTarget.style.background = `${theme.border}22`}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                  {columns.map(col => (
+                    <td key={col.key} style={{ ...tdS, ...(col.tdStyle || {}) }}>
+                      {col.render ? col.render(row) : (row[col.key] ?? "—")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination footer */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "12px 16px", borderTop: `1px solid ${theme.border}`, fontSize: 12, color: theme.textMuted,
+        }}>
+          <span>
+            Showing {filtered.length === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length}
+          </span>
+          <Pagination page={safePage} totalPages={totalPages} setPage={setPage} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+// Helper: yes/no badge
+const YesNo = ({ val, yesColor, noColor }) => (
+  <span style={{ color: val ? (yesColor || theme.green) : (noColor || theme.textMuted), fontWeight: 500 }}>
+    {val ? "Yes" : "No"}
+  </span>
+);
+
+// Helper: tag pill
+const Tag = ({ children }) => (
+  <span style={{
+    fontSize: 10, padding: "2px 7px", borderRadius: 20,
+    background: `${theme.border}88`, color: theme.textDim,
+    border: `1px solid ${theme.border}`, fontFamily: "monospace", whiteSpace: "nowrap",
+  }}>{children}</span>
+);
+
+// ── Tab Definitions ───────────────────────────────────────────────────
 
 const TABS = [
   { id: "overview",     label: "Overview",     icon: Activity },
@@ -234,7 +422,24 @@ const TABS = [
   { id: "findings",     label: "Findings",     icon: AlertTriangle },
 ];
 
-// ── Main App ─────────────────────────────────────────────────────────
+// ── Status badge helper ───────────────────────────────────────────────
+
+function StatusBadge({ val, trueLabel = "Active", falseLabel = "Disabled", trueColor, falseColor }) {
+  const isTrue = val === true || val === trueLabel || val === "Yes" || val === "Live" || val === "Enabled";
+  const label = isTrue ? trueLabel : falseLabel;
+  const color = isTrue ? (trueColor || theme.green) : (falseColor || theme.yellow);
+  const bg = isTrue ? theme.greenDim : theme.yellowDim;
+  return (
+    <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 20, fontWeight: 600, color, background: bg, whiteSpace: "nowrap" }}>
+      {label}
+    </span>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────
+
+const ALL_KEYS = ["overview", "playbooks", "cases", "trends", "connectors", "webhooks",
+  "environments", "agents", "apiKeys", "users", "instances", "jobs", "ide", "findings"];
 
 export default function App() {
   const [tab, setTab] = useState("overview");
@@ -274,17 +479,136 @@ export default function App() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  const refreshAll = loadAll;
-
   const ov = data.overview || {};
   const anyLoading = Object.values(loading).some(Boolean);
 
+  // ── Playbooks columns ─────────────────────────────────────────────
+  const pbRows = (data.playbooks?.playbooks || []).map((p, i) => ({ ...p, _key: p.id || i }));
+  const pbCols = [
+    {
+      key: "name", label: "Playbook Name",
+      tdStyle: { fontWeight: 600, maxWidth: 260 },
+      render: r => (
+        <div>
+          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 250 }} title={r.name}>{r.name}</div>
+          {r.description && <div style={{ fontSize: 11, color: theme.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 250 }} title={r.description}>{r.description}</div>}
+        </div>
+      ),
+    },
+    { key: "status", label: "Status", render: r => <StatusBadge val={r.status} trueLabel="Active" falseLabel="Disabled" /> },
+    { key: "playbookType", label: "Type", render: r => <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 20, background: theme.border, color: theme.textMuted }}>{r.playbookType || "Playbook"}</span> },
+    {
+      key: "integrations", label: "Integrations", noSort: false,
+      getValue: r => (r.integrations || []).length,
+      tdStyle: { maxWidth: 280 },
+      render: r => (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+          {(r.integrations || []).length === 0
+            ? <span style={{ color: theme.textMuted, fontSize: 11 }}>—</span>
+            : (r.integrations || []).map(t => <Tag key={t}>{t}</Tag>)}
+        </div>
+      ),
+    },
+    { key: "steps", label: "Steps", getValue: r => r.steps || 0, tdStyle: { textAlign: "center" }, render: r => r.steps || 0 },
+    { key: "category", label: "Category", tdStyle: { fontSize: 11, color: theme.textMuted, fontFamily: "monospace", whiteSpace: "nowrap" } },
+    { key: "updateTime", label: "Last Modified", tdStyle: { fontSize: 11, color: theme.textMuted, fontFamily: "monospace", whiteSpace: "nowrap" }, render: r => r.updateTime ? r.updateTime.slice(0, 10) : "—" },
+  ];
+
+  // ── Connectors: flatten grouped object into rows ───────────────────
+  const connRows = Object.entries(data.connectors?.connectors || {}).flatMap(([intg, cards]) =>
+    cards.map((c, i) => ({ ...c, _intg: intg, _key: `${intg}-${i}` }))
+  );
+  const connCols = [
+    { key: "name", label: "Connector Name", tdStyle: { fontWeight: 500 } },
+    { key: "_intg", label: "Integration", tdStyle: { color: theme.textDim, fontFamily: "monospace", fontSize: 12 } },
+    { key: "isEnabled", label: "Enabled", render: r => <YesNo val={r.isEnabled} /> },
+  ];
+
+  // ── Webhooks ──────────────────────────────────────────────────────
+  const whRows = (data.webhooks?.webhooks || []).map((w, i) => ({ ...w, _key: i, _name: w.name || w.identifier }));
+  const whCols = [
+    { key: "_name", label: "Name", tdStyle: { fontWeight: 500 } },
+    { key: "environment", label: "Environment", tdStyle: { color: theme.textDim } },
+    { key: "isEnabled", label: "Enabled", render: r => <YesNo val={r.isEnabled} /> },
+  ];
+
+  // ── Agents ────────────────────────────────────────────────────────
+  const agentRows = (data.agents?.agents || []).map((a, i) => ({ ...a, _key: i, _envs: (a.environments || []).join(", ") || "—" }));
+  const agentCols = [
+    { key: "name", label: "Name", tdStyle: { fontWeight: 500 } },
+    {
+      key: "status", label: "Status",
+      render: r => (
+        <span style={{
+          color: r.status === "Live" ? theme.green : r.status === "Failed" ? theme.red : theme.yellow,
+          fontWeight: 600, fontSize: 12,
+        }}>{r.status}</span>
+      ),
+    },
+    { key: "_envs", label: "Environments", tdStyle: { color: theme.textDim, fontSize: 12 } },
+  ];
+
+  // ── Users ─────────────────────────────────────────────────────────
+  const userRows = (data.users?.users || []).map((u, i) => ({
+    ...u, _key: i,
+    _roles: (u.socRoles || []).join(", ") || "—",
+    _envs: (u.environments || []).join(", ") || "—",
+  }));
+  const userCols = [
+    { key: "email", label: "Email", tdStyle: { fontWeight: 500 } },
+    { key: "_roles", label: "Roles", tdStyle: { color: theme.textDim, fontSize: 12 } },
+    { key: "providerName", label: "Provider", tdStyle: { color: theme.textDim, fontSize: 12 } },
+    { key: "_envs", label: "Environments", tdStyle: { color: theme.textMuted, fontSize: 12 } },
+    { key: "isDisabled", label: "Disabled", render: r => <YesNo val={r.isDisabled} yesColor={theme.red} noColor={theme.green} /> },
+  ];
+
+  // ── Instances ─────────────────────────────────────────────────────
+  const instRows = (data.instances?.instances || []).map((inst, i) => ({ ...inst, _key: i }));
+  const instCols = [
+    { key: "environment", label: "Environment", tdStyle: { color: theme.textDim } },
+    { key: "type", label: "Integration Type", tdStyle: { fontWeight: 500 } },
+    { key: "name", label: "Instance Name" },
+    { key: "isRemote", label: "Remote", render: r => <YesNo val={r.isRemote} yesColor={theme.purple} noColor={theme.textMuted} /> },
+  ];
+
+  // ── Jobs ─────────────────────────────────────────────────────────
+  const jobRows = (data.jobs?.jobs || []).map((j, i) => ({ ...j, _key: i }));
+  const jobCols = [
+    { key: "name", label: "Name", tdStyle: { fontWeight: 500 } },
+    { key: "integration", label: "Integration", tdStyle: { color: theme.textDim } },
+    { key: "isEnabled", label: "Enabled", render: r => <YesNo val={r.isEnabled} /> },
+    { key: "isCustom", label: "Custom", render: r => <YesNo val={r.isCustom} yesColor={theme.purple} noColor={theme.textMuted} /> },
+  ];
+
+  // ── IDE Integrations ──────────────────────────────────────────────
+  const ideRows = (data.ide?.integrations || []).map((intg, i) => ({ ...intg, _key: i }));
+  const ideCols = [
+    { key: "name", label: "Integration", tdStyle: { fontWeight: 500 } },
+    { key: "isCustom", label: "Custom", render: r => <YesNo val={r.isCustom} yesColor={theme.purple} noColor={theme.textMuted} /> },
+    {
+      key: "actions", label: "Actions", noSort: true,
+      render: r => (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+          {(r.actions || []).slice(0, 8).map((a, j) => (
+            <span key={j} style={{ background: theme.border, borderRadius: 6, padding: "2px 8px", fontSize: 11, color: theme.textDim }}>{a}</span>
+          ))}
+          {(r.actions || []).length > 8 && <span style={{ fontSize: 11, color: theme.textMuted }}>+{r.actions.length - 8} more</span>}
+        </div>
+      ),
+    },
+  ];
+
   return (
-    <div style={{
-      background: theme.bg, color: theme.text, minHeight: "100vh",
-      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-    }}>
-      {/* ── Header ── */}
+    <div style={{ background: theme.bg, color: theme.text, minHeight: "100vh", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+      <style>{`
+        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+        .spinning { animation: spin 1s linear infinite }
+      `}</style>
+
+      {/* Global loading progress bar */}
+      <LoadingBar keys={ALL_KEYS} loading={loading} />
+
+      {/* Header */}
       <header style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
         padding: "18px 28px", borderBottom: `1px solid ${theme.border}`,
@@ -294,33 +618,23 @@ export default function App() {
           <CodSecLogo size={44} />
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, letterSpacing: -0.3 }}>
-              <span style={{ background: theme.gradientText, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-                CODSEC
-              </span>
+              <span style={{ background: theme.gradientText, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>CODSEC</span>
               <span style={{ color: theme.textDim, fontWeight: 400, marginLeft: 8 }}>Pulse</span>
             </h1>
-            <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 2 }}>
-              Google Chronicle SOAR Assessment
-            </div>
+            <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 2 }}>Google Chronicle SOAR Assessment</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={refreshAll} style={{
-            display: "flex", alignItems: "center", gap: 6, background: "transparent",
-            border: `1px solid ${theme.border}`, borderRadius: 10, padding: "8px 16px",
-            color: theme.textDim, cursor: "pointer", fontSize: 12, fontWeight: 500,
-          }}>
-            <RefreshCw size={14} className={anyLoading ? "spinning" : ""} />
-            Refresh
-          </button>
-        </div>
+        <button onClick={loadAll} style={{
+          display: "flex", alignItems: "center", gap: 6, background: "transparent",
+          border: `1px solid ${theme.border}`, borderRadius: 10, padding: "8px 16px",
+          color: theme.textDim, cursor: "pointer", fontSize: 12, fontWeight: 500,
+        }}>
+          <RefreshCw size={14} className={anyLoading ? "spinning" : ""} /> Refresh
+        </button>
       </header>
 
-      {/* ── Tabs ── */}
-      <nav style={{
-        display: "flex", gap: 2, padding: "12px 28px",
-        borderBottom: `1px solid ${theme.border}`, overflowX: "auto",
-      }}>
+      {/* Tabs */}
+      <nav style={{ display: "flex", gap: 2, padding: "12px 28px", borderBottom: `1px solid ${theme.border}`, overflowX: "auto" }}>
         {TABS.map(t => {
           const active = tab === t.id;
           return (
@@ -332,537 +646,293 @@ export default function App() {
               transition: "all 0.15s", whiteSpace: "nowrap",
               boxShadow: active ? `0 0 20px ${theme.accentGlow}` : "none",
             }}>
-              <t.icon size={15} />
-              {t.label}
+              <t.icon size={15} />{t.label}
             </button>
           );
         })}
       </nav>
 
-      {/* ── Content ── */}
+      {/* Content */}
       <main style={{ padding: "24px 28px", maxWidth: 1400, margin: "0 auto" }}>
 
         {/* OVERVIEW */}
         {tab === "overview" && (
-          <>
-            {loading.overview ? <LoadingState /> : errors.overview ? (
-              <ErrorState message={errors.overview} onRetry={() => fetchData("overview", api.overview)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                  <StatCard icon={Layers} label="Playbooks" value={ov.totalPlaybooks || 0}
-                    sub={`${ov.activePlaybooks || 0} active · ${ov.disabledPlaybooks || 0} disabled`} />
-                  <StatCard icon={FileSearch} label="Cases (30d)" value={(ov.totalCases30d || 0).toLocaleString()}
-                    color={theme.accent} glow={theme.accentGlow} />
-                  <StatCard icon={Clock} label="Avg MTTR" value={`${ov.avgMttrHours || 0}h`} sub="Mean time to resolve" />
-                  <StatCard icon={Zap} label="Automation" value={`${ov.automationRate || 0}%`}
-                    color={theme.green} glow={theme.greenDim} sub="Benchmark: ~60%" />
-                </div>
-
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-                  <div style={{
-                    background: theme.bgCard, borderRadius: 14, padding: 22,
-                    border: `1px solid ${theme.border}`, flex: "2 1 360px",
-                  }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Case Volume Trend</div>
-                    <div style={{ display: "flex", gap: 16, fontSize: 11, color: theme.textMuted, marginBottom: 12 }}>
-                      <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.accent, marginRight: 5 }} />Automated</span>
-                      <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.purple, marginRight: 5 }} />Manual</span>
-                    </div>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <AreaChart data={ov.caseTrends || []}>
-                        <defs>
-                          <linearGradient id="autoGrad" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor={theme.accent} stopOpacity={0.4} />
-                            <stop offset="95%" stopColor={theme.accent} stopOpacity={0} />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
-                        <XAxis dataKey="month" tick={{ fill: theme.textMuted, fontSize: 11 }} />
-                        <YAxis tick={{ fill: theme.textMuted, fontSize: 11 }} />
-                        <Tooltip {...chartTooltipStyle} />
-                        <Area type="monotone" dataKey="automated" stroke={theme.accent} fill="url(#autoGrad)" strokeWidth={2} />
-                        <Area type="monotone" dataKey="manual" stroke={theme.purple} fill="transparent" strokeWidth={2} strokeDasharray="5 5" />
-                      </AreaChart>
-                    </ResponsiveContainer>
+          errors.overview ? <ErrorState message={errors.overview} onRetry={() => fetchData("overview", api.overview)} /> : (
+            <>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                <StatCard icon={Layers} label="Playbooks" value={ov.totalPlaybooks || 0} sub={`${ov.activePlaybooks || 0} active · ${ov.disabledPlaybooks || 0} disabled`} />
+                <StatCard icon={FileSearch} label="Cases (30d)" value={(ov.totalCases30d || 0).toLocaleString()} color={theme.accent} glow={theme.accentGlow} />
+                <StatCard icon={Clock} label="Avg MTTR" value={`${ov.avgMttrHours || 0}h`} sub="Mean time to resolve" />
+                <StatCard icon={Zap} label="Automation" value={`${ov.automationRate || 0}%`} color={theme.green} glow={theme.greenDim} sub="Benchmark: ~60%" />
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "2 1 360px" }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Case Volume Trend</div>
+                  <div style={{ display: "flex", gap: 16, fontSize: 11, color: theme.textMuted, marginBottom: 12 }}>
+                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.accent, marginRight: 5 }} />Automated</span>
+                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.purple, marginRight: 5 }} />Manual</span>
                   </div>
-
-                  <div style={{
-                    background: theme.bgCard, borderRadius: 14, padding: 22,
-                    border: `1px solid ${theme.border}`, flex: "1 1 200px",
-                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                  }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Maturity Score</div>
-                    <ScoreRing score={ov.maturityScore || 0} />
-                    <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 10, textAlign: "center" }}>
-                      {(ov.maturityScore || 0) >= 80 ? "Excellent" : (ov.maturityScore || 0) >= 60 ? "Good — room to improve" : "Needs attention"}
-                    </div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <AreaChart data={ov.caseTrends || []}>
+                      <defs>
+                        <linearGradient id="autoGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor={theme.accent} stopOpacity={0.4} />
+                          <stop offset="95%" stopColor={theme.accent} stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+                      <XAxis dataKey="month" tick={{ fill: theme.textMuted, fontSize: 11 }} />
+                      <YAxis tick={{ fill: theme.textMuted, fontSize: 11 }} />
+                      <Tooltip {...chartTooltipStyle} />
+                      <Area type="monotone" dataKey="automated" stroke={theme.accent} fill="url(#autoGrad)" strokeWidth={2} />
+                      <Area type="monotone" dataKey="manual" stroke={theme.purple} fill="transparent" strokeWidth={2} strokeDasharray="5 5" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 200px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Maturity Score</div>
+                  <ScoreRing score={ov.maturityScore || 0} />
+                  <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 10, textAlign: "center" }}>
+                    {(ov.maturityScore || 0) >= 80 ? "Excellent" : (ov.maturityScore || 0) >= 60 ? "Good — room to improve" : "Needs attention"}
                   </div>
                 </div>
-              </>
-            )}
-          </>
+              </div>
+            </>
+          )
         )}
 
         {/* PLAYBOOKS */}
         {tab === "playbooks" && (
-          <>
-            {loading.playbooks ? <LoadingState /> : errors.playbooks ? (
-              <ErrorState message={errors.playbooks} onRetry={() => fetchData("playbooks", api.playbooks)} />
-            ) : (() => {
-              const pbs = data.playbooks?.playbooks || [];
-              const active = pbs.filter(p => p.status === "Active").length;
-              const disabled = pbs.filter(p => p.status === "Disabled").length;
-              const allIntegrations = [...new Set(pbs.flatMap(p => p.integrations || []))].sort();
-              return (
-                <>
-                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                    <StatCard icon={Layers} label="Total" value={pbs.length} />
-                    <StatCard icon={CheckCircle} label="Active" value={active} color={theme.green} />
-                    <StatCard icon={XCircle} label="Disabled" value={disabled} color={theme.yellow} />
-                    <StatCard icon={Link2} label="Integrations Used" value={allIntegrations.length} color={theme.purple} />
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 14 }}>
-                    {pbs.map((pb, i) => {
-                      const isActive = pb.status === "Active";
-                      return (
-                        <div key={i} style={{
-                          background: theme.bgCard, border: `1px solid ${theme.border}`,
-                          borderRadius: 16, padding: 20,
-                        }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                            <span style={{
-                              fontSize: 11, padding: "3px 10px", borderRadius: 20, fontWeight: 600,
-                              background: isActive ? theme.greenDim : theme.yellowDim,
-                              color: isActive ? theme.green : theme.yellow,
-                            }}>{pb.status}</span>
-                            <span style={{
-                              fontSize: 11, padding: "3px 10px", borderRadius: 20,
-                              background: `${theme.border}`, color: theme.textMuted,
-                            }}>{pb.playbookType || "Playbook"}</span>
-                          </div>
-                          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>{pb.name}</div>
-                          <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8, fontFamily: "monospace" }}>{pb.category}</div>
-                          {pb.description && (
-                            <p style={{ fontSize: 12, color: theme.textDim, lineHeight: 1.6, marginBottom: 10,
-                              display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                              {pb.description}
-                            </p>
-                          )}
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
-                            {(pb.integrations || []).length === 0
-                              ? <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: "monospace" }}>No integrations detected</span>
-                              : (pb.integrations || []).map(intg => (
-                                <span key={intg} style={{
-                                  fontSize: 11, padding: "2px 9px", borderRadius: 20,
-                                  background: `${theme.border}88`, color: theme.textDim,
-                                  border: `1px solid ${theme.border}`, fontFamily: "monospace",
-                                }}>{intg}</span>
-                              ))
-                            }
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between",
-                            borderTop: `1px solid ${theme.border}44`, paddingTop: 10, fontSize: 11, color: theme.textMuted, fontFamily: "monospace" }}>
-                            <span>{pb.steps || 0} steps</span>
-                            <span>{pb.updateTime ? pb.updateTime.slice(0, 10) : "—"}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              );
-            })()}
-          </>
+          errors.playbooks ? <ErrorState message={errors.playbooks} onRetry={() => fetchData("playbooks", api.playbooks)} /> : (
+            <DataTable
+              columns={pbCols}
+              rows={pbRows}
+              searchKeys={["name", "category"]}
+              filters={[
+                { key: "status", label: "Status", values: ["All", "Active", "Disabled"] },
+                { key: "playbookType", label: "Type", values: ["All", "Playbook", "Block"] },
+              ]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  <StatCard icon={Layers} label="Total" value={pbRows.length} />
+                  <StatCard icon={CheckCircle} label="Active" value={pbRows.filter(p => p.status === "Active").length} color={theme.green} />
+                  <StatCard icon={XCircle} label="Disabled" value={pbRows.filter(p => p.status === "Disabled").length} color={theme.yellow} />
+                  <StatCard icon={Link2} label="Integrations Used" value={[...new Set(pbRows.flatMap(p => p.integrations || []))].length} color={theme.purple} />
+                </div>
+              }
+              emptyMsg="No playbooks match your filters."
+            />
+          )
         )}
 
         {/* CASES */}
         {tab === "cases" && (
-          <>
-            {loading.cases ? <LoadingState /> : errors.cases ? (
-              <ErrorState message={errors.cases} onRetry={() => fetchData("cases", () => api.cases(30))} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                  <StatCard icon={FileSearch} label="Total Cases" value={(data.cases?.total_cases || 0).toLocaleString()} sub="Last 30 days" />
-                  <StatCard icon={Clock} label="Avg MTTR" value={`${data.cases?.avg_mttr_hours || 0}h`} color={theme.accent} />
-                </div>
-
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                  <div style={{
-                    background: theme.bgCard, borderRadius: 14, padding: 22,
-                    border: `1px solid ${theme.border}`, flex: "1 1 300px",
-                  }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Severity Breakdown</div>
-                    {Object.entries(data.cases?.severity_breakdown || {}).map(([sev, count]) => (
-                      <div key={sev} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-                        <SeverityDot severity={sev} />
-                        <span style={{ flex: 1, fontSize: 13 }}>{sev}</span>
-                        <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums", minWidth: 40, textAlign: "right" }}>{count}</span>
-                        <div style={{ width: 100, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
-                          <div style={{
-                            height: "100%", borderRadius: 3, width: `${Math.min((count / Math.max(...Object.values(data.cases?.severity_breakdown || { x: 1 }))) * 100, 100)}%`,
-                            background: sev === "CRITICAL" ? theme.red : sev === "HIGH" ? "#fb923c" : sev === "MEDIUM" ? theme.yellow : theme.textMuted,
-                          }} />
-                        </div>
+          errors.cases ? <ErrorState message={errors.cases} onRetry={() => fetchData("cases", () => api.cases(30))} /> : (
+            <>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                <StatCard icon={FileSearch} label="Total Cases" value={(data.cases?.total_cases || 0).toLocaleString()} sub="Last 30 days" />
+                <StatCard icon={Clock} label="Avg MTTR" value={`${data.cases?.avg_mttr_hours || 0}h`} color={theme.accent} />
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Severity Breakdown</div>
+                  {Object.entries(data.cases?.severity_breakdown || {}).map(([sev, count]) => (
+                    <div key={sev} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                      <SeverityDot severity={sev} />
+                      <span style={{ flex: 1, fontSize: 13 }}>{sev}</span>
+                      <span style={{ fontWeight: 700, minWidth: 40, textAlign: "right" }}>{count}</span>
+                      <div style={{ width: 100, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{
+                          height: "100%", borderRadius: 3,
+                          width: `${Math.min((count / Math.max(...Object.values(data.cases?.severity_breakdown || { x: 1 }))) * 100, 100)}%`,
+                          background: sev === "CRITICAL" ? theme.red : sev === "HIGH" ? "#fb923c" : sev === "MEDIUM" ? theme.yellow : theme.textMuted,
+                        }} />
                       </div>
-                    ))}
-                  </div>
-
-                  <div style={{
-                    background: theme.bgCard, borderRadius: 14, padding: 22,
-                    border: `1px solid ${theme.border}`, flex: "1 1 300px",
-                  }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Status Distribution</div>
-                    {Object.entries(data.cases?.status_breakdown || {}).map(([st, count]) => (
-                      <div key={st} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-                        <span style={{ flex: 1, fontSize: 13, color: theme.textDim }}>{st.replace(/_/g, " ")}</span>
-                        <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{count}</span>
-                      </div>
-                    ))}
-                  </div>
+                    </div>
+                  ))}
                 </div>
-              </>
-            )}
-          </>
+                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Status Distribution</div>
+                  {Object.entries(data.cases?.status_breakdown || {}).map(([st, count]) => (
+                    <div key={st} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                      <span style={{ flex: 1, fontSize: 13, color: theme.textDim }}>{st.replace(/_/g, " ")}</span>
+                      <span style={{ fontWeight: 700 }}>{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )
         )}
 
         {/* CONNECTORS */}
         {tab === "connectors" && (
-          <>
-            {loading.connectors ? <LoadingState /> : errors.connectors ? (
-              <ErrorState message={errors.connectors} onRetry={() => fetchData("connectors", api.connectors)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          errors.connectors ? <ErrorState message={errors.connectors} onRetry={() => fetchData("connectors", api.connectors)} /> : (
+            <DataTable
+              columns={connCols}
+              rows={connRows}
+              searchKeys={["name", "_intg"]}
+              filters={[{ key: "isEnabled", label: "Enabled", values: ["All", "true", "false"] }]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Plug} label="Total Connectors" value={data.connectors?.total || 0} />
-                  <StatCard icon={CheckCircle} label="Integrations"
-                    value={Object.keys(data.connectors?.connectors || {}).length} color={theme.green} />
+                  <StatCard icon={CheckCircle} label="Integrations" value={Object.keys(data.connectors?.connectors || {}).length} color={theme.green} />
+                  <StatCard icon={CheckCircle} label="Enabled" value={connRows.filter(c => c.isEnabled).length} color={theme.green} />
                 </div>
-                {Object.entries(data.connectors?.connectors || {}).map(([integration, cards]) => (
-                  <div key={integration} style={{ marginBottom: 20 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: theme.textDim, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.6 }}>{integration}</div>
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                        <thead>
-                          <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                            {["Connector Name", "Enabled"].map(h => (
-                              <th key={h} style={{ textAlign: "left", padding: "10px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {cards.map((c, i) => (
-                            <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                              <td style={{ padding: "12px 14px", fontWeight: 500 }}>{c.name}</td>
-                              <td style={{ padding: "12px 14px" }}>
-                                <span style={{ color: c.isEnabled ? theme.green : theme.textMuted, fontWeight: 500 }}>{c.isEnabled ? "Yes" : "No"}</span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ))}
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No connectors found."
+            />
+          )
         )}
 
         {/* WEBHOOKS */}
         {tab === "webhooks" && (
-          <>
-            {loading.webhooks ? <LoadingState /> : errors.webhooks ? (
-              <ErrorState message={errors.webhooks} onRetry={() => fetchData("webhooks", api.webhooks)} />
-            ) : (
-              <>
-                <StatCard icon={Webhook} label="Total Webhooks" value={data.webhooks?.total || 0} />
-                <div style={{ overflowX: "auto", marginTop: 20 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Name", "Environment", "Enabled"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.webhooks?.webhooks || []).map((wh, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                          <td style={{ padding: "14px", fontWeight: 500 }}>{wh.name || wh.identifier}</td>
-                          <td style={{ padding: "14px", color: theme.textDim }}>{wh.environment || "—"}</td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{ color: wh.isEnabled ? theme.green : theme.textMuted, fontWeight: 500 }}>{wh.isEnabled ? "Yes" : "No"}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+          errors.webhooks ? <ErrorState message={errors.webhooks} onRetry={() => fetchData("webhooks", api.webhooks)} /> : (
+            <DataTable
+              columns={whCols}
+              rows={whRows}
+              searchKeys={["_name", "environment"]}
+              filters={[{ key: "isEnabled", label: "Enabled", values: ["All", "true", "false"] }]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  <StatCard icon={Webhook} label="Total Webhooks" value={data.webhooks?.total || 0} />
+                  <StatCard icon={CheckCircle} label="Enabled" value={whRows.filter(w => w.isEnabled).length} color={theme.green} />
                 </div>
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No webhooks found."
+            />
+          )
         )}
 
         {/* ENVIRONMENTS */}
         {tab === "environments" && (
-          <>
-            {loading.environments ? <LoadingState /> : errors.environments ? (
-              <ErrorState message={errors.environments} onRetry={() => fetchData("environments", api.environments)} />
-            ) : (
-              <>
+          errors.environments ? <ErrorState message={errors.environments} onRetry={() => fetchData("environments", api.environments)} /> : (
+            <>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
                 <StatCard icon={Globe} label="Environments" value={data.environments?.total || 0} />
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 20 }}>
-                  {(data.environments?.environments || []).map((env, i) => (
-                    <div key={i} style={{
-                      background: theme.bgCard, border: `1px solid ${theme.border}`,
-                      borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 500,
-                    }}>{env}</div>
-                  ))}
-                </div>
-              </>
-            )}
-          </>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                {(data.environments?.environments || []).map((env, i) => (
+                  <div key={i} style={{ background: theme.bgCard, border: `1px solid ${theme.border}`, borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 500 }}>{env}</div>
+                ))}
+              </div>
+            </>
+          )
         )}
 
         {/* AGENTS */}
         {tab === "agents" && (
-          <>
-            {loading.agents ? <LoadingState /> : errors.agents ? (
-              <ErrorState message={errors.agents} onRetry={() => fetchData("agents", api.agents)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          errors.agents ? <ErrorState message={errors.agents} onRetry={() => fetchData("agents", api.agents)} /> : (
+            <DataTable
+              columns={agentCols}
+              rows={agentRows}
+              searchKeys={["name", "_envs"]}
+              filters={[{ key: "status", label: "Status", values: ["All", "Live", "Failed", "Unknown"] }]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Bot} label="Total Agents" value={data.agents?.total || 0} />
-                  <StatCard icon={CheckCircle} label="Live"
-                    value={(data.agents?.agents || []).filter(a => a.status === "Live").length} color={theme.green} />
-                  <StatCard icon={XCircle} label="Failed"
-                    value={(data.agents?.agents || []).filter(a => a.status === "Failed").length} color={theme.red} />
+                  <StatCard icon={CheckCircle} label="Live" value={agentRows.filter(a => a.status === "Live").length} color={theme.green} />
+                  <StatCard icon={XCircle} label="Failed" value={agentRows.filter(a => a.status === "Failed").length} color={theme.red} />
                 </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Name", "Status", "Environments"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.agents?.agents || []).map((a, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                          <td style={{ padding: "14px", fontWeight: 500 }}>{a.name}</td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{
-                              color: a.status === "Live" ? theme.green : a.status === "Failed" ? theme.red : theme.yellow,
-                              fontWeight: 500,
-                            }}>{a.status}</span>
-                          </td>
-                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>{(a.environments || []).join(", ") || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No agents found."
+            />
+          )
         )}
 
         {/* USERS */}
         {tab === "users" && (
-          <>
-            {loading.users ? <LoadingState /> : errors.users ? (
-              <ErrorState message={errors.users} onRetry={() => fetchData("users", api.users)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          errors.users ? <ErrorState message={errors.users} onRetry={() => fetchData("users", api.users)} /> : (
+            <DataTable
+              columns={userCols}
+              rows={userRows}
+              searchKeys={["email", "_roles", "providerName"]}
+              filters={[{ key: "isDisabled", label: "Disabled", values: ["All", "true", "false"] }]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Users} label="Total Users" value={data.users?.total || 0} />
-                  <StatCard icon={XCircle} label="Disabled"
-                    value={(data.users?.users || []).filter(u => u.isDisabled).length} color={theme.red} />
+                  <StatCard icon={XCircle} label="Disabled" value={userRows.filter(u => u.isDisabled).length} color={theme.red} />
+                  <StatCard icon={CheckCircle} label="Active" value={userRows.filter(u => !u.isDisabled).length} color={theme.green} />
                 </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Email", "Roles", "Provider", "Environments", "Disabled"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.users?.users || []).map((u, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                          <td style={{ padding: "14px", fontWeight: 500 }}>{u.email}</td>
-                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>{(u.socRoles || []).join(", ") || "—"}</td>
-                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>{u.providerName || "—"}</td>
-                          <td style={{ padding: "14px", color: theme.textMuted, fontSize: 12 }}>{(u.environments || []).join(", ") || "—"}</td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{ color: u.isDisabled ? theme.red : theme.green, fontWeight: 500 }}>{u.isDisabled ? "Yes" : "No"}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No users found."
+            />
+          )
         )}
 
         {/* INTEGRATION INSTANCES */}
         {tab === "instances" && (
-          <>
-            {loading.instances ? <LoadingState /> : errors.instances ? (
-              <ErrorState message={errors.instances} onRetry={() => fetchData("instances", api.instances)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          errors.instances ? <ErrorState message={errors.instances} onRetry={() => fetchData("instances", api.instances)} /> : (
+            <DataTable
+              columns={instCols}
+              rows={instRows}
+              searchKeys={["environment", "type", "name"]}
+              filters={[{ key: "isRemote", label: "Remote", values: ["All", "true", "false"] }]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Package} label="Total Instances" value={data.instances?.total || 0} />
-                  <StatCard icon={Bot} label="Remote"
-                    value={(data.instances?.instances || []).filter(i => i.isRemote).length} color={theme.purple} />
+                  <StatCard icon={Bot} label="Remote" value={instRows.filter(i => i.isRemote).length} color={theme.purple} />
                 </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Environment", "Integration Type", "Instance Name", "Remote"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.instances?.instances || []).map((inst, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                          <td style={{ padding: "14px", color: theme.textDim }}>{inst.environment}</td>
-                          <td style={{ padding: "14px", fontWeight: 500 }}>{inst.type}</td>
-                          <td style={{ padding: "14px" }}>{inst.name}</td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{ color: inst.isRemote ? theme.purple : theme.textMuted, fontWeight: 500 }}>{inst.isRemote ? "Yes" : "No"}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No instances found."
+            />
+          )
         )}
 
         {/* JOBS */}
         {tab === "jobs" && (
-          <>
-            {loading.jobs ? <LoadingState /> : errors.jobs ? (
-              <ErrorState message={errors.jobs} onRetry={() => fetchData("jobs", api.jobs)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          errors.jobs ? <ErrorState message={errors.jobs} onRetry={() => fetchData("jobs", api.jobs)} /> : (
+            <DataTable
+              columns={jobCols}
+              rows={jobRows}
+              searchKeys={["name", "integration"]}
+              filters={[
+                { key: "isEnabled", label: "Enabled", values: ["All", "true", "false"] },
+                { key: "isCustom", label: "Custom", values: ["All", "true", "false"] },
+              ]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Briefcase} label="Total Jobs" value={data.jobs?.total || 0} />
-                  <StatCard icon={CheckCircle} label="Enabled"
-                    value={(data.jobs?.jobs || []).filter(j => j.isEnabled).length} color={theme.green} />
-                  <StatCard icon={Code} label="Custom"
-                    value={(data.jobs?.jobs || []).filter(j => j.isCustom).length} color={theme.purple} />
+                  <StatCard icon={CheckCircle} label="Enabled" value={jobRows.filter(j => j.isEnabled).length} color={theme.green} />
+                  <StatCard icon={Code} label="Custom" value={jobRows.filter(j => j.isCustom).length} color={theme.purple} />
                 </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Name", "Integration", "Enabled", "Custom"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.jobs?.jobs || []).map((j, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                          <td style={{ padding: "14px", fontWeight: 500 }}>{j.name}</td>
-                          <td style={{ padding: "14px", color: theme.textDim }}>{j.integration || "—"}</td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{ color: j.isEnabled ? theme.green : theme.textMuted, fontWeight: 500 }}>{j.isEnabled ? "Yes" : "No"}</span>
-                          </td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{ color: j.isCustom ? theme.purple : theme.textMuted, fontWeight: 500 }}>{j.isCustom ? "Yes" : "No"}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No jobs found."
+            />
+          )
         )}
 
         {/* IDE */}
         {tab === "ide" && (
-          <>
-            {loading.ide ? <LoadingState /> : errors.ide ? (
-              <ErrorState message={errors.ide} onRetry={() => fetchData("ide", api.ide)} />
-            ) : (
-              <>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          errors.ide ? <ErrorState message={errors.ide} onRetry={() => fetchData("ide", api.ide)} /> : (
+            <DataTable
+              columns={ideCols}
+              rows={ideRows}
+              searchKeys={["name"]}
+              filters={[{ key: "isCustom", label: "Custom", values: ["All", "true", "false"] }]}
+              statsBar={
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Code} label="Integrations" value={data.ide?.total || 0} />
-                  <StatCard icon={Zap} label="Custom"
-                    value={(data.ide?.integrations || []).filter(i => i.isCustom).length} color={theme.purple} />
+                  <StatCard icon={Zap} label="Custom" value={ideRows.filter(i => i.isCustom).length} color={theme.purple} />
                 </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                        {["Integration", "Custom", "Actions"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "12px 14px", color: theme.textMuted, fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data.ide?.integrations || []).map((intg, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${theme.border}22` }}>
-                          <td style={{ padding: "14px", fontWeight: 500 }}>{intg.name}</td>
-                          <td style={{ padding: "14px" }}>
-                            <span style={{ color: intg.isCustom ? theme.purple : theme.textMuted, fontWeight: 500 }}>{intg.isCustom ? "Yes" : "No"}</span>
-                          </td>
-                          <td style={{ padding: "14px", color: theme.textDim, fontSize: 12 }}>
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                              {(intg.actions || []).slice(0, 8).map((a, j) => (
-                                <span key={j} style={{
-                                  background: theme.border, borderRadius: 6, padding: "2px 8px",
-                                  fontSize: 11, color: theme.textDim,
-                                }}>{a}</span>
-                              ))}
-                              {(intg.actions || []).length > 8 && (
-                                <span style={{ fontSize: 11, color: theme.textMuted }}>+{intg.actions.length - 8} more</span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-          </>
+              }
+              emptyMsg="No integrations found."
+            />
+          )
         )}
 
         {/* FINDINGS */}
         {tab === "findings" && (
-          <>
-            {loading.findings ? <LoadingState /> : errors.findings ? (
-              <ErrorState message={errors.findings} onRetry={() => fetchData("findings", api.findings)} />
-            ) : (
-              <>
-                <p style={{ fontSize: 13, color: theme.textMuted, marginTop: 0, marginBottom: 18 }}>
-                  Automated assessment based on environment scan — {(data.findings?.findings || []).length} findings detected.
-                </p>
-                {(data.findings?.findings || []).map((f, i) => (
-                  <FindingCard key={i} finding={f} />
-                ))}
-              </>
-            )}
-          </>
+          errors.findings ? <ErrorState message={errors.findings} onRetry={() => fetchData("findings", api.findings)} /> : (
+            <>
+              <p style={{ fontSize: 13, color: theme.textMuted, marginTop: 0, marginBottom: 18 }}>
+                Automated assessment based on environment scan — {(data.findings?.findings || []).length} findings detected.
+              </p>
+              {(data.findings?.findings || []).map((f, i) => <FindingCard key={i} finding={f} />)}
+            </>
+          )
         )}
+
       </main>
     </div>
   );
