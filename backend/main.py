@@ -48,14 +48,14 @@ def _get_client() -> httpx.AsyncClient:
     if _http_client is None or _http_client.is_closed:
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
             http2=False,  # SOAR API does not support HTTP/2
         )
     return _http_client
 
 # ── Simple in-memory response cache (TTL: 60s) ────────────────────────
 _cache: dict = {}  # key → (timestamp, value)
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 300  # seconds (5 min — covers full page load cycle)
 
 def _cache_get(key: str):
     entry = _cache.get(key)
@@ -65,9 +65,6 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, value):
     _cache[key] = (time.monotonic(), value)
-
-def _cache_clear():
-    _cache.clear()
 
 # ── Runtime credentials (overrides .env when set via /api/connect) ────
 _runtime: dict = {}
@@ -136,8 +133,8 @@ async def chronicle_request(
 
     # Check cache for GET requests
     cache_key = None
-    if use_cache and method.upper() == "GET":
-        cache_key = f"{url}?{merged_params}"
+    if use_cache:
+        cache_key = f"{method}:{url}?{merged_params}:{json_body}"
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
@@ -589,55 +586,6 @@ async def get_playbooks():
     return {"playbooks": playbooks, "total": len(playbooks)}
 
 
-@app.get("/api/playbooks/{playbook_id}/runs")
-async def get_playbook_runs(
-    playbook_id: str,
-    days: int = Query(default=30, ge=1, le=365),
-):
-    """
-    Fetch execution history for a specific playbook.
-    """
-    url = f"{_get_soar_base()}/playbooks/{playbook_id}/executions"
-    start_time = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
-    params = {"filter": f'create_time>"{start_time}"', "pageSize": 1000}
-
-    data = await chronicle_request("GET", url, params=params)
-    executions = data.get("executions", [])
-
-    runtimes = []
-    statuses = {"SUCCESS": 0, "FAILED": 0, "RUNNING": 0, "CANCELLED": 0}
-
-    for ex in executions:
-        status = ex.get("state", "UNKNOWN")
-        statuses[status] = statuses.get(status, 0) + 1
-
-        start = ex.get("startTime")
-        end = ex.get("endTime")
-        if start and end:
-            try:
-                s = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                e = datetime.fromisoformat(end.replace("Z", "+00:00"))
-                runtimes.append((e - s).total_seconds())
-            except (ValueError, TypeError):
-                pass
-
-    avg_runtime = sum(runtimes) / len(runtimes) if runtimes else 0
-    p95_runtime = sorted(runtimes)[int(len(runtimes) * 0.95)] if len(runtimes) > 1 else avg_runtime
-    total = len(executions)
-    fail_rate = (statuses.get("FAILED", 0) / total * 100) if total > 0 else 0
-
-    return {
-        "playbook_id": playbook_id,
-        "period_days": days,
-        "total_runs": total,
-        "avg_runtime_sec": round(avg_runtime, 2),
-        "p95_runtime_sec": round(p95_runtime, 2),
-        "fail_rate_pct": round(fail_rate, 2),
-        "statuses": statuses,
-        "runtimes": runtimes[-100:],  # last 100 for charting
-    }
-
-
 # ── Cases ─────────────────────────────────────────────────────────────
 
 @app.get("/api/cases")
@@ -646,6 +594,7 @@ async def get_cases(
     status: Optional[str] = Query(default=None),
     severity: Optional[str] = Query(default=None),
     page_size: int = Query(default=100, ge=1, le=1000),
+    skip_playbooks: bool = False,
 ):
     """
     Fetch cases from Chronicle SOAR with optional filters.
@@ -666,7 +615,7 @@ async def get_cases(
         "orderBy": "updateTime desc",
         "pageSize": page_size,
     }
-    cases = await chronicle_paginated_fetch(url, params, result_key="cases", max_pages=10)
+    cases = await chronicle_paginated_fetch(url, params, result_key="cases", max_pages=20)
 
     severity_counts = {}
     status_counts = {}
@@ -691,12 +640,68 @@ async def get_cases(
 
     avg_mttr = sum(resolution_times) / len(resolution_times) if resolution_times else 0
 
+    # Daily volume (computed from ALL cases, not just the truncated list)
+    daily_counts: dict[str, int] = {}
+    assignee_counts: dict[str, int] = {}
+    for case in cases:
+        created = case.get("creationTime", case.get("createTime"))
+        if created:
+            try:
+                ts = created / 1000 if isinstance(created, (int, float)) else datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
+                day = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+                daily_counts[day] = daily_counts.get(day, 0) + 1
+            except (ValueError, TypeError, OSError):
+                pass
+        assignee = case.get("assignedUser", case.get("assignee", "Unassigned")) or "Unassigned"
+        assignee_counts[assignee] = assignee_counts.get(assignee, 0) + 1
+
+    daily_volume = [{"day": d, "count": c} for d, c in sorted(daily_counts.items())]
+    top_assignees = sorted(assignee_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    # Fetch playbook names from case alerts (ALL cases, batched concurrently)
+    top_playbooks = []
+    if not skip_playbooks:
+        all_ids = [
+            str(c.get("id", c.get("name", "")))
+            for c in cases
+            if c.get("id") or c.get("name")
+        ]
+
+        async def _fetch_case_playbooks(case_id: str) -> list[str]:
+            try:
+                data = await chronicle_request(
+                    "GET", f"{_get_soar_base()}/cases/{case_id}/alerts",
+                    params={"format": "camel", "pageSize": 10},
+                    timeout=5.0, use_cache=True,
+                )
+                return list({
+                    a.get("attachedPlaybookName", "")
+                    for a in data.get("alerts", [])
+                    if a.get("attachedPlaybookName")
+                })
+            except Exception:
+                return []
+
+        # Process in batches of 100 concurrently
+        playbook_counts: dict[str, int] = {}
+        for batch_start in range(0, len(all_ids), 100):
+            batch = all_ids[batch_start:batch_start + 100]
+            pb_results = await asyncio.gather(*[_fetch_case_playbooks(cid) for cid in batch])
+            for pbs in pb_results:
+                for pb in pbs:
+                    playbook_counts[pb] = playbook_counts.get(pb, 0) + 1
+        top_playbooks = sorted(playbook_counts.items(), key=lambda x: x[1], reverse=True)
+
     return {
         "total_cases": len(cases),
         "period_days": days,
         "severity_breakdown": severity_counts,
         "status_breakdown": status_counts,
         "avg_mttr_hours": round(avg_mttr, 2),
+        "daily_volume": daily_volume,
+        "top_assignees": [{"name": n, "count": c} for n, c in top_assignees],
+        "closed_with_time": len(resolution_times),
+        "playbook_breakdown": [{"name": n, "count": c} for n, c in top_playbooks],
         "cases": [
             {
                 "id": str(c.get("id", c.get("name", ""))),
@@ -783,20 +788,46 @@ async def _paginated_post(endpoint: str, base_payload: dict, use_cache: bool = F
 
 @app.get("/api/connectors")
 async def get_connectors():
-    """Fetch connector cards from connectors/cards (SOARManager pattern)."""
+    """Fetch connector cards and their alert statistics concurrently."""
     data = await chronicle_request("GET", f"{_ext()}/connectors/cards", use_cache=True)
     raw = data if isinstance(data, list) else data.get("connectors", data.get("data", []))
-    result = {}
+
+    # Collect all cards with their identifiers
+    all_cards = []
     for group in raw:
         integration = group.get("integration", "Unknown")
-        cards = []
         for card in group.get("cards", []):
-            cards.append({
+            identifier = card.get("identifier", "")
+            all_cards.append({
+                "integration": integration,
                 "name": card.get("displayName", card.get("name", "")),
+                "identifier": identifier,
                 "isEnabled": card.get("isEnabled", False),
             })
-        if cards:
-            result[integration] = cards
+
+    # Fetch statistics for each connector concurrently
+    async def _fetch_stats(identifier: str) -> dict:
+        if not identifier:
+            return {}
+        try:
+            encoded = identifier.replace(" ", "%20")
+            return await chronicle_request(
+                "GET", f"{_ext()}/connectors/{encoded}/statistics?format=camel",
+                use_cache=True, timeout=5.0
+            )
+        except Exception:
+            return {}
+
+    stats_list = await asyncio.gather(*[_fetch_stats(c["identifier"]) for c in all_cards])
+
+    # Merge stats into cards and group by integration
+    result = {}
+    for card, stats in zip(all_cards, stats_list):
+        card["alertsLastDay"] = stats.get("amountAlertsInLastDay", 0)
+        card["avgAlertsPerDay"] = stats.get("avgAlertsPerDay", 0)
+        integration = card.pop("integration")
+        result.setdefault(integration, []).append(card)
+
     return {"connectors": result, "total": sum(len(v) for v in result.values())}
 
 
@@ -808,13 +839,20 @@ async def get_webhooks():
     data = await chronicle_request("GET", f"{_ext()}/webhooks-management/cards", use_cache=True)
     raw = data if isinstance(data, list) else data.get("webhooks", data.get("data", []))
 
-    async def _fetch_detail(wh):
+    async def _fetch_detail_and_stats(wh):
         identifier = wh.get("identifier", "")
         detail = {}
+        stats = {}
         if identifier:
             try:
-                detail = await chronicle_request(
-                    "GET", f"{_ext()}/webhooks-management/{identifier}", use_cache=True
+                detail, stats = await asyncio.gather(
+                    chronicle_request(
+                        "GET", f"{_ext()}/webhooks-management/{identifier}", use_cache=True
+                    ),
+                    chronicle_request(
+                        "GET", f"{_ext()}/webhooks-management/{identifier}/statistics?format=camel",
+                        use_cache=True, timeout=5.0
+                    ),
                 )
             except Exception:
                 pass
@@ -823,9 +861,11 @@ async def get_webhooks():
             "name": detail.get("name", wh.get("name", wh.get("displayName", ""))),
             "environment": detail.get("defaultEnvironment", ""),
             "isEnabled": detail.get("isEnabled", wh.get("isEnabled", False)),
+            "alertsLastDay": stats.get("amountAlertsInLastDay", 0),
+            "avgAlertsPerDay": stats.get("avgAlertsPerDay", 0),
         }
 
-    webhooks = await asyncio.gather(*[_fetch_detail(wh) for wh in raw])
+    webhooks = await asyncio.gather(*[_fetch_detail_and_stats(wh) for wh in raw])
     return {"webhooks": list(webhooks), "total": len(webhooks)}
 
 
@@ -1003,6 +1043,10 @@ def _version_risk(installed: str, latest: str) -> str:
     """
     Compare installed vs latest version strings.
     Returns: 'high' | 'medium' | 'low' | 'ok' | 'unknown'
+
+    For semver (X.Y.Z): major gap = high, minor gap = medium, patch = low.
+    For single-number versions (common in Siemplify): gap >= 10 = high,
+    gap >= 3 = medium, gap >= 1 = low.
     """
     if not installed or not latest or installed == "unknown" or latest == "unknown":
         return "unknown"
@@ -1012,6 +1056,15 @@ def _version_risk(installed: str, latest: str) -> str:
         return "unknown"
     if iv == lv:
         return "ok"
+    # Single-number versions (no dots) — use numeric gap
+    if "." not in str(installed).strip() and "." not in str(latest).strip():
+        gap = lv[0] - iv[0]
+        if gap >= 10:
+            return "high"
+        if gap >= 3:
+            return "medium"
+        return "low"
+    # Semver comparison
     if iv[0] < lv[0]:
         return "high"
     if iv[1] < lv[1]:
@@ -1019,81 +1072,54 @@ def _version_risk(installed: str, latest: str) -> str:
     return "low"
 
 
-# Cached working marketplace endpoint (discovered at runtime)
-_MARKETPLACE_ENDPOINT: Optional[str] = None
-
-async def _fetch_marketplace_integrations() -> dict[str, str]:
-    """
-    Discover the Siemplify marketplace/store integrations endpoint and return
-    a dict of {identifier -> version} for all available integrations.
-    Falls back to empty dict if all candidates fail.
-    """
-    global _MARKETPLACE_ENDPOINT
-    candidates = [
-        f"{_ext()}/integrations/GetAllIntegrations",
-        f"{_ext()}/integrations/GetIntegrationsStore",
-        f"{_ext()}/integrations/GetMarketplaceIntegrations",
-    ]
-
-    # Use cached working endpoint if already discovered
-    if _MARKETPLACE_ENDPOINT:
-        try:
-            data = await chronicle_request(
-                "POST", _MARKETPLACE_ENDPOINT, json_body={"name": "*"}, use_cache=True
-            )
-            return _extract_version_map(data)
-        except Exception:
-            _MARKETPLACE_ENDPOINT = None  # reset and re-discover
-
-    for url in candidates:
-        try:
-            data = await chronicle_request(
-                "POST", url, json_body={"name": "*"}, use_cache=True
-            )
-            versions = _extract_version_map(data)
-            if versions:
-                _MARKETPLACE_ENDPOINT = url
-                logger.info(f"Marketplace endpoint discovered: {url}")
-                return versions
-        except Exception as exc:
-            logger.debug(f"Marketplace candidate {url} failed: {exc}")
-
-    logger.warning("No marketplace integration endpoint found; version risk will be 'unknown'")
-    return {}
-
-
-def _extract_version_map(data: dict) -> dict[str, str]:
-    """Extract {identifier -> version} from a GetAll/GetStore integrations response."""
-    result = {}
-    for intg in data.get("integrations", []):
-        identifier = intg.get("identifier") or intg.get("name") or intg.get("displayName", "")
-        version = intg.get("version") or intg.get("integrationVersion", "")
-        if identifier and version:
-            result[str(identifier)] = str(version)
-    return result
-
-
 # ── IDE / Integration Actions ─────────────────────────────────────────
 
 @app.get("/api/ide")
 async def get_ide():
-    """Fetch installed integrations with version risk comparison against marketplace."""
-    installed_data, marketplace_versions = await asyncio.gather(
+    """Fetch installed integrations with version risk comparison.
+    Two concurrent fetches:
+      1. External API GetEnvironmentInstalledIntegrations — actions, isCustom
+      2. v1alpha /integrations — version (installed), latestVersion (marketplace)
+    Joined by identifier.
+    """
+    ext_data, v1_data = await asyncio.gather(
         chronicle_request(
             "POST", f"{_ext()}/integrations/GetEnvironmentInstalledIntegrations",
             json_body={"name": "*"}, use_cache=True
         ),
-        _fetch_marketplace_integrations(),
+        chronicle_request(
+            "GET", f"{_get_soar_base()}/integrations",
+            use_cache=True, timeout=10.0
+        ),
     )
 
+    # Build version map from v1alpha: identifier -> {version, latestVersion}
+    # v1alpha identifier may include "__<uuid>" suffix — strip it
+    version_map: dict[str, dict] = {}
+    for vi in v1_data.get("integrations", []):
+        raw_id = vi.get("identifier") or vi.get("displayName", "")
+        ident = raw_id.split("__")[0] if "__" in raw_id else raw_id
+        ver = str(vi.get("version") or "")
+        latest = str(vi.get("latestVersion") or "")
+        # Some integrations appear multiple times (different envs); keep the one
+        # with the highest installed version
+        existing = version_map.get(ident)
+        if not existing or (ver and ver > (existing.get("version") or "")):
+            version_map[ident] = {"version": ver, "latestVersion": latest}
+
     ides = []
-    for intg in installed_data.get("integrations", []):
+    for intg in ext_data.get("integrations", []):
         identifier = intg.get("identifier") or intg.get("name") or intg.get("displayName", "")
-        installed_ver = intg.get("version") or intg.get("integrationVersion", "") or "unknown"
-        latest_ver = marketplace_versions.get(str(identifier), "unknown")
+        actions = [f.get("name", "") for f in intg.get("integrationSupportedActions", [])]
+
+        vm = version_map.get(str(identifier), {})
+        installed_ver = vm.get("version") or str(intg.get("versionForDisplay") or intg.get("version") or "unknown")
+        latest_ver = vm.get("latestVersion") or installed_ver
+        # latestVersion of "0" means no marketplace entry (custom integration)
+        if latest_ver in ("0", ""):
+            latest_ver = installed_ver
         risk = _version_risk(installed_ver, latest_ver)
 
-        actions = [f.get("name", "") for f in intg.get("integrationSupportedActions", [])]
         ides.append({
             "name": intg.get("displayName", ""),
             "identifier": str(identifier),
@@ -1115,82 +1141,113 @@ async def get_overview():
     Calls internal endpoints and merges results.
     """
     try:
-        # 3 concurrent fetches — trends dropped, derived from cases instead
-        playbooks_data, cases_data, integrations_data, ide_data = await asyncio.gather(
+        playbooks_data, cases_data, connectors_data, ide_data, webhooks_data = await asyncio.gather(
             get_playbooks(),
-            get_cases(days=90, status=None, severity=None, page_size=1000),
+            get_cases(days=30, status=None, severity=None, page_size=1000, skip_playbooks=True),
             get_connectors(),
             get_ide(),
+            get_webhooks(),
         )
 
+        # ── Playbooks ──
         pbs = playbooks_data["playbooks"]
         active = sum(1 for p in pbs if p["status"] == "Active")
         disabled = sum(1 for p in pbs if p["status"] == "Disabled")
+        unique_integrations = list({t for p in pbs for t in (p.get("integrations") or [])})
 
+        # ── Cases ──
         total_cases = cases_data["total_cases"]
-        open_cases = cases_data["status_breakdown"].get("OPEN", 0) + \
-                     cases_data["status_breakdown"].get("IN_PROGRESS", 0)
-
-        total_int = integrations_data["total"]
-        healthy_int = total_int
-        outdated_high = sum(1 for i in ide_data["integrations"] if i["versionRisk"] == "high")
-        outdated_medium = sum(1 for i in ide_data["integrations"] if i["versionRisk"] == "medium")
-
-        # Build monthly trend from status breakdown
-        # Automation rate = closed cases / total cases.
-        # Chronicle does not expose closedByPlaybook without expand=closureDetails
-        # (expensive). Using close rate as the best available proxy: a high close
-        # rate relative to open cases reflects effective playbook-driven resolution.
         status_bd = cases_data.get("status_breakdown", {})
-        closed_statuses = {"CLOSED", "RESOLVED", "FALSE_POSITIVE", "MERGED"}
-        closed_count = sum(v for k, v in status_bd.items() if k.upper() in closed_statuses)
-        total_cases_90 = cases_data["total_cases"]
-        automation_rate = (closed_count / total_cases_90 * 100) if total_cases_90 > 0 else 0
+        open_cases = status_bd.get("Opened", 0) + status_bd.get("IN_PROGRESS", 0)
+        closed_statuses = {"CLOSED", "RESOLVED", "FALSE_POSITIVE", "MERGED", "Closed"}
+        closed_count = sum(v for k, v in status_bd.items() if k in closed_statuses or k.upper() in closed_statuses)
+        automation_rate = (closed_count / total_cases * 100) if total_cases > 0 else 0
+        sev_bd = cases_data.get("severity_breakdown", {})
+        crit_high = (sev_bd.get("PriorityCritical", 0) + sev_bd.get("PriorityHigh", 0))
 
-        # Build monthly trend from the returned case list
-        monthly: dict = {}
+        # Build daily trend from the returned case list
+        daily: dict = {}
         for c in cases_data.get("cases", []):
-            created = c.get("createTime", "")
+            created = c.get("createTime")
             if created:
-                month_key = str(created)[:7]
-                if month_key not in monthly:
-                    monthly[month_key] = {"total": 0, "automated": 0, "manual": 0}
-                monthly[month_key]["total"] += 1
-                if c.get("closeTime"):
-                    monthly[month_key]["automated"] += 1
-                else:
-                    monthly[month_key]["manual"] += 1
-        trends = [{"month": k, **v} for k, v in sorted(monthly.items())]
+                try:
+                    ts = created / 1000 if isinstance(created, (int, float)) else datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
+                    day_key = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+                    if day_key not in daily:
+                        daily[day_key] = {"total": 0, "closed": 0, "open": 0}
+                    daily[day_key]["total"] += 1
+                    if c.get("closeTime"):
+                        daily[day_key]["closed"] += 1
+                    else:
+                        daily[day_key]["open"] += 1
+                except (ValueError, TypeError, OSError):
+                    pass
+        trends = [{"day": k, **v} for k, v in sorted(daily.items())]
 
-        # Maturity score calculation
+        # ── Connectors ──
+        all_conns = [c for cards in connectors_data.get("connectors", {}).values() for c in cards]
+        total_conns = len(all_conns)
+        enabled_conns = sum(1 for c in all_conns if c.get("isEnabled"))
+        active_conns = sum(1 for c in all_conns if (c.get("alertsLastDay") or 0) > 0)
+
+        # ── Webhooks ──
+        all_wh = webhooks_data.get("webhooks", [])
+        total_wh = len(all_wh)
+        enabled_wh = sum(1 for w in all_wh if w.get("isEnabled"))
+        active_wh = sum(1 for w in all_wh if (w.get("alertsLastDay") or 0) > 0)
+
+        # ── IDE / Integrations ──
+        integrations = ide_data.get("integrations", [])
+        total_int = len(integrations)
+        outdated_high = sum(1 for i in integrations if i["versionRisk"] == "high")
+        outdated_medium = sum(1 for i in integrations if i["versionRisk"] == "medium")
+        outdated_low = sum(1 for i in integrations if i["versionRisk"] == "low")
+        custom_int = sum(1 for i in integrations if i.get("isCustom"))
+
+        # ── Maturity score ──
         playbook_coverage = min((active / max(active + disabled, 1)) * 100, 100)
-        integration_health = (healthy_int / max(total_int, 1)) * 100
+        connector_health = (active_conns / max(enabled_conns, 1)) * 100  # % of enabled connectors receiving alerts
+        integration_freshness = ((total_int - outdated_high - outdated_medium) / max(total_int, 1)) * 100
         maturity = int(
-            automation_rate * 0.35 +
-            playbook_coverage * 0.25 +
-            integration_health * 0.25 +
+            automation_rate * 0.30 +
+            playbook_coverage * 0.20 +
+            integration_freshness * 0.20 +
+            connector_health * 0.15 +
             min(100, (100 - cases_data.get("avg_mttr_hours", 10))) * 0.15
         )
 
         return {
+            # Playbooks
             "totalPlaybooks": len(pbs),
             "activePlaybooks": active,
             "disabledPlaybooks": disabled,
+            "uniqueIntegrations": len(unique_integrations),
+            # Cases
             "totalCases30d": total_cases,
             "openCases": open_cases,
+            "closedCases": closed_count,
+            "critHighCases": crit_high,
             "avgMttrHours": cases_data["avg_mttr_hours"],
             "automationRate": round(automation_rate, 1),
-            "maturityScore": max(0, min(100, maturity)),
-            "integrationHealth": {
-                "total": total_int,
-                "healthy": healthy_int,
-                "degraded": 0,
-                "error": 0,
-            },
-            "severityBreakdown": cases_data["severity_breakdown"],
+            "severityBreakdown": sev_bd,
+            "statusBreakdown": status_bd,
             "caseTrends": trends,
+            # Connectors
+            "totalConnectors": total_conns,
+            "enabledConnectors": enabled_conns,
+            "activeConnectors": active_conns,
+            # Webhooks
+            "totalWebhooks": total_wh,
+            "enabledWebhooks": enabled_wh,
+            "activeWebhooks": active_wh,
+            # Integrations
+            "totalIntegrations": total_int,
+            "customIntegrations": custom_int,
             "outdatedHigh": outdated_high,
             "outdatedMedium": outdated_medium,
+            "outdatedLow": outdated_low,
+            # Score
+            "maturityScore": max(0, min(100, maturity)),
         }
     except HTTPException:
         raise
@@ -1242,19 +1299,20 @@ async def get_findings():
                 "detail": "High ratio of disabled playbooks suggests technical debt. Review and archive unused ones.",
             })
 
-        # Check integrations
-        int_health = overview.get("integrationHealth", {})
-        if int_health.get("error", 0) > 0:
+        # Check connector health
+        enabled_conns = overview.get("enabledConnectors", 0)
+        active_conns = overview.get("activeConnectors", 0)
+        if enabled_conns > 0 and active_conns == 0:
             findings.append({
                 "type": "critical",
-                "title": f"{int_health['error']} integration(s) in error state",
-                "detail": "Failing integrations may cause silent playbook failures. Check credentials and connectivity.",
+                "title": "No connectors are receiving alerts",
+                "detail": f"{enabled_conns} connector(s) enabled but none received alerts in the last 24h. Check connector configuration and SIEM connectivity.",
             })
-        if int_health.get("degraded", 0) > 0:
+        elif enabled_conns > 0 and active_conns < enabled_conns * 0.5:
             findings.append({
                 "type": "warning",
-                "title": f"{int_health['degraded']} integration(s) degraded",
-                "detail": "Degraded integrations may cause increased latency. Monitor for further deterioration.",
+                "title": f"Only {active_conns} of {enabled_conns} enabled connectors are active",
+                "detail": "Less than half of enabled connectors received alerts in the last 24h. Review inactive connectors.",
             })
 
         # Check MTTR

@@ -2,15 +2,15 @@
  * CodSec Chronicle SOAR Evaluator — React Frontend v3
  */
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
   AreaChart, Area,
 } from "recharts";
 import {
-  Shield, Activity, AlertTriangle, CheckCircle, XCircle, Clock,
-  Zap, TrendingUp, Layers, Link2, FileSearch, RefreshCw, Loader2,
-  Plug, Webhook, Globe, Bot, Key, Users, Package, Briefcase, Code,
+  Activity, AlertTriangle, CheckCircle, XCircle, Clock,
+  Zap, Layers, Link2, FileSearch, RefreshCw,
+  Plug, Webhook, Globe, Bot, Users, Package, Briefcase, Code,
 } from "lucide-react";
 
 // ── API Service ──────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ async function apiFetch(endpoint, params = {}) {
 const api = {
   overview: () => apiFetch("/api/overview"),
   playbooks: () => apiFetch("/api/playbooks"),
-  cases: (days, status, severity) => apiFetch("/api/cases", { days, status, severity }),
+  cases: (days, status, severity) => apiFetch("/api/cases", { days, status, severity, page_size: 1000 }),
   caseTrends: (days) => apiFetch("/api/cases/trends", { days }),
   connectors: () => apiFetch("/api/connectors"),
   webhooks: () => apiFetch("/api/webhooks"),
@@ -177,53 +177,38 @@ const chartTooltipStyle = {
   labelStyle: { color: theme.textDim },
 };
 
-// ── Loading Progress Bar ──────────────────────────────────────────────
+// ── Header progress indicator (non-blocking) ────────────────────────
 
-function LoadingOverlay({ keys, loading }) {
+function HeaderProgress({ keys, loading }) {
   const total = keys.length;
   const done = keys.filter(k => loading[k] === false).length;
   const anyLoading = keys.some(k => loading[k] === true);
   const pct = total === 0 ? 100 : Math.round((done / total) * 100);
 
-  if (!anyLoading && pct === 100) return null;
-
-  const size = 140;
-  const stroke = 10;
-  const r = (size - stroke) / 2;
-  const circ = 2 * Math.PI * r;
-  const offset = circ - (pct / 100) * circ;
+  if (!anyLoading || pct === 100) return null;
 
   return (
+    <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: 3, zIndex: 9999, background: theme.border }}>
+      <div style={{
+        height: "100%", width: `${pct}%`,
+        background: `linear-gradient(90deg, #da009e, #a855f7, #6cb4ff)`,
+        transition: "width 0.4s ease",
+        borderRadius: "0 2px 2px 0",
+      }} />
+    </div>
+  );
+}
+
+// ── Per-tab loading spinner ──────────────────────────────────────────
+
+function TabLoading({ label }) {
+  return (
     <div style={{
-      position: "fixed", inset: 0, zIndex: 9999,
       display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      background: "rgba(10, 2, 18, 0.85)", backdropFilter: "blur(6px)",
+      padding: "60px 0", color: theme.textMuted,
     }}>
-      <svg width={size} height={size}>
-        <defs>
-          <linearGradient id="loadGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#da009e" />
-            <stop offset="50%" stopColor="#a855f7" />
-            <stop offset="100%" stopColor="#6cb4ff" />
-          </linearGradient>
-        </defs>
-        {/* Track */}
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={theme.border} strokeWidth={stroke} />
-        {/* Progress arc */}
-        <circle cx={size/2} cy={size/2} r={r} fill="none"
-          stroke="url(#loadGrad)" strokeWidth={stroke}
-          strokeDasharray={circ} strokeDashoffset={offset}
-          strokeLinecap="round"
-          transform={`rotate(-90 ${size/2} ${size/2})`}
-          style={{ transition: "stroke-dashoffset 0.4s ease" }}
-        />
-        {/* Percentage text */}
-        <text x={size/2} y={size/2 - 6} textAnchor="middle" fill={theme.text} fontSize={28} fontWeight={700}>{pct}%</text>
-        <text x={size/2} y={size/2 + 16} textAnchor="middle" fill={theme.textMuted} fontSize={11}>Loading</text>
-      </svg>
-      <div style={{ marginTop: 18, fontSize: 13, color: theme.textDim }}>
-        {done} of {total} data sources
-      </div>
+      <RefreshCw size={28} className="spinning" style={{ marginBottom: 12, color: theme.accent }} />
+      <div style={{ fontSize: 13 }}>Loading {label || "data"}...</div>
     </div>
   );
 }
@@ -429,9 +414,8 @@ function VersionRiskBadge({ risk }) {
     medium:  { label: "Medium",  bg: "#3d2e10", color: "#fbbf24" },
     low:     { label: "Low",     bg: "#132d1f", color: "#4ade80" },
     ok:      { label: "OK",      bg: "transparent", color: "#6b7280" },
-    unknown: { label: "Unknown", bg: "transparent", color: "#6b7280" },
   };
-  const s = map[risk] || map.unknown;
+  const s = map[risk] || map.ok;
   return (
     <span style={{
       background: s.bg, color: s.color,
@@ -510,7 +494,7 @@ export default function App() {
     fetchData("overview", api.overview);
     fetchData("playbooks", api.playbooks);
     fetchData("cases", () => api.cases(30));
-    fetchData("trends", () => api.caseTrends(90));
+    fetchData("trends", () => api.caseTrends(30));
     fetchData("connectors", api.connectors);
     fetchData("webhooks", api.webhooks);
     fetchData("environments", api.environments);
@@ -529,7 +513,7 @@ export default function App() {
   const anyLoading = Object.values(loading).some(Boolean);
 
   // ── Playbooks columns ─────────────────────────────────────────────
-  const pbRows = (data.playbooks?.playbooks || []).map((p, i) => ({ ...p, _key: p.id || i }));
+  const pbRows = (data.playbooks?.playbooks || []).map((p, i) => ({ ...p, _key: p.id || i, _integrations: (p.integrations || []).join(", ") }));
   const pbCols = [
     {
       key: "name", label: "Playbook Name",
@@ -568,6 +552,10 @@ export default function App() {
     { key: "name", label: "Connector Name", tdStyle: { fontWeight: 500 } },
     { key: "_intg", label: "Integration", tdStyle: { color: theme.textDim, fontFamily: "monospace", fontSize: 12 } },
     { key: "isEnabled", label: "Enabled", render: r => <YesNo val={r.isEnabled} /> },
+    { key: "alertsLastDay", label: "Alerts (24h)", tdStyle: { textAlign: "center", fontWeight: 600 },
+      render: r => <span style={{ color: r.alertsLastDay > 0 ? theme.green : theme.textMuted }}>{r.alertsLastDay ?? 0}</span> },
+    { key: "avgAlertsPerDay", label: "Avg/Day (90d)", tdStyle: { textAlign: "center" },
+      render: r => <span style={{ color: theme.textDim }}>{r.avgAlertsPerDay ?? 0}</span> },
   ];
 
   // ── Webhooks ──────────────────────────────────────────────────────
@@ -576,6 +564,10 @@ export default function App() {
     { key: "_name", label: "Name", tdStyle: { fontWeight: 500 } },
     { key: "environment", label: "Environment", tdStyle: { color: theme.textDim } },
     { key: "isEnabled", label: "Enabled", render: r => <YesNo val={r.isEnabled} /> },
+    { key: "alertsLastDay", label: "Alerts (24h)", tdStyle: { textAlign: "center", fontWeight: 600 },
+      render: r => <span style={{ color: r.alertsLastDay > 0 ? theme.green : theme.textMuted }}>{r.alertsLastDay ?? 0}</span> },
+    { key: "avgAlertsPerDay", label: "Avg/Day (90d)", tdStyle: { textAlign: "center" },
+      render: r => <span style={{ color: theme.textDim }}>{r.avgAlertsPerDay ?? 0}</span> },
   ];
 
   // ── Agents ────────────────────────────────────────────────────────
@@ -652,10 +644,11 @@ export default function App() {
       <style>{`
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
         .spinning { animation: spin 1s linear infinite }
+        @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
       `}</style>
 
-      {/* Global loading overlay */}
-      <LoadingOverlay keys={ALL_KEYS} loading={loading} />
+      {/* Thin progress bar at top (non-blocking) */}
+      <HeaderProgress keys={ALL_KEYS} loading={loading} />
 
       {/* Header */}
       <header style={{
@@ -686,6 +679,8 @@ export default function App() {
       <nav style={{ display: "flex", gap: 2, padding: "12px 28px", borderBottom: `1px solid ${theme.border}`, overflowX: "auto" }}>
         {TABS.map(t => {
           const active = tab === t.id;
+          const tabLoading = loading[t.id];
+          const tabDone = data[t.id] !== undefined || errors[t.id];
           return (
             <button key={t.id} onClick={() => setTab(t.id)} style={{
               display: "flex", alignItems: "center", gap: 7, padding: "9px 20px",
@@ -694,8 +689,15 @@ export default function App() {
               color: active ? "#fff" : theme.textMuted,
               transition: "all 0.15s", whiteSpace: "nowrap",
               boxShadow: active ? `0 0 20px ${theme.accentGlow}` : "none",
+              position: "relative",
             }}>
               <t.icon size={15} />{t.label}
+              {tabLoading && !tabDone && (
+                <span style={{
+                  width: 6, height: 6, borderRadius: "50%", background: theme.accent,
+                  animation: "pulse 1.2s ease-in-out infinite",
+                }} />
+              )}
             </button>
           );
         })}
@@ -706,65 +708,119 @@ export default function App() {
 
         {/* OVERVIEW */}
         {tab === "overview" && (
-          errors.overview ? <ErrorState message={errors.overview} onRetry={() => fetchData("overview", api.overview)} /> : (
-            <>
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                <StatCard icon={Layers} label="Playbooks" value={ov.totalPlaybooks || 0} sub={`${ov.activePlaybooks || 0} active · ${ov.disabledPlaybooks || 0} disabled`} />
-                <StatCard icon={FileSearch} label="Cases (30d)" value={(ov.totalCases30d || 0).toLocaleString()} color={theme.accent} glow={theme.accentGlow} />
-                <StatCard icon={Clock} label="Avg MTTR" value={`${ov.avgMttrHours || 0}h`} sub="Mean time to resolve" />
-                <StatCard icon={Zap} label="Close Rate" value={`${ov.automationRate || 0}%`} color={theme.green} glow={theme.greenDim} sub="Closed / total cases (90d)" />
-                <StatCard
-                  icon={AlertTriangle}
-                  label="Outdated Integrations"
-                  value={(ov.outdatedHigh || 0) + (ov.outdatedMedium || 0)}
-                  color={(ov.outdatedHigh || 0) > 0 ? "#f87171" : theme.yellow}
-                  glow={(ov.outdatedHigh || 0) > 0 ? "#f8717133" : undefined}
-                  sub={`${ov.outdatedHigh || 0} major · ${ov.outdatedMedium || 0} minor behind`}
-                />
-              </div>
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "2 1 360px" }}>
-                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Case Volume Trend</div>
-                  <div style={{ display: "flex", gap: 16, fontSize: 11, color: theme.textMuted, marginBottom: 12 }}>
-                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.accent, marginRight: 5 }} />Closed</span>
-                    <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.purple, marginRight: 5 }} />Open</span>
-                  </div>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <AreaChart data={ov.caseTrends || []}>
-                      <defs>
-                        <linearGradient id="autoGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={theme.accent} stopOpacity={0.4} />
-                          <stop offset="95%" stopColor={theme.accent} stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
-                      <XAxis dataKey="month" tick={{ fill: theme.textMuted, fontSize: 11 }} />
-                      <YAxis tick={{ fill: theme.textMuted, fontSize: 11 }} />
-                      <Tooltip {...chartTooltipStyle} />
-                      <Area type="monotone" dataKey="automated" stroke={theme.accent} fill="url(#autoGrad)" strokeWidth={2} />
-                      <Area type="monotone" dataKey="manual" stroke={theme.purple} fill="transparent" strokeWidth={2} strokeDasharray="5 5" />
-                    </AreaChart>
-                  </ResponsiveContainer>
+          loading.overview ? <TabLoading label="overview" /> :
+          errors.overview ? <ErrorState message={errors.overview} onRetry={() => fetchData("overview", api.overview)} /> :
+          (() => {
+            const outdatedTotal = (ov.outdatedHigh || 0) + (ov.outdatedMedium || 0) + (ov.outdatedLow || 0);
+            const sevBd = ov.severityBreakdown || {};
+            const statusBd = ov.statusBreakdown || {};
+            const sevData = Object.entries(sevBd).map(([k, v]) => ({ name: k.replace("Priority", ""), value: v }));
+            return (
+              <>
+                {/* Row 1: Key metrics */}
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Layers} label="Playbooks" value={ov.totalPlaybooks || 0} sub={`${ov.activePlaybooks || 0} active · ${ov.disabledPlaybooks || 0} disabled`} />
+                  <StatCard icon={FileSearch} label="Cases (30d)" value={(ov.totalCases30d || 0).toLocaleString()} color={theme.accent} glow={theme.accentGlow} sub={`${ov.openCases || 0} open · ${ov.closedCases || 0} closed`} />
+                  <StatCard icon={Zap} label="Close Rate" value={`${ov.automationRate || 0}%`} color={theme.green} glow={theme.greenDim} sub="Closed / total (30d)" />
+                  <StatCard icon={Clock} label="Avg MTTR" value={ov.avgMttrHours ? (ov.avgMttrHours >= 24 ? `${Math.round(ov.avgMttrHours / 24)}d` : `${Math.round(ov.avgMttrHours)}h`) : "0h"} sub="Mean time to resolve" />
+                  <StatCard icon={AlertTriangle} label="Critical / High" value={ov.critHighCases || 0} color={(ov.critHighCases || 0) > 0 ? "#f87171" : theme.textMuted} />
                 </div>
-                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 200px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Maturity Score</div>
-                  <ScoreRing score={ov.maturityScore || 0} />
-                  <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 10, textAlign: "center" }}>
-                    {(ov.maturityScore || 0) >= 80 ? "Excellent" : (ov.maturityScore || 0) >= 60 ? "Good — room to improve" : "Needs attention"}
+
+                {/* Row 2: Infrastructure stats */}
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={Plug} label="Connectors" value={ov.totalConnectors || 0} sub={`${ov.enabledConnectors || 0} enabled · ${ov.activeConnectors || 0} receiving alerts`} />
+                  <StatCard icon={Webhook} label="Webhooks" value={ov.totalWebhooks || 0} sub={`${ov.enabledWebhooks || 0} enabled · ${ov.activeWebhooks || 0} receiving alerts`} />
+                  <StatCard icon={Code} label="Integrations" value={ov.totalIntegrations || 0} sub={`${ov.customIntegrations || 0} custom · ${ov.uniqueIntegrations || 0} used in playbooks`} />
+                  <StatCard
+                    icon={AlertTriangle}
+                    label="Outdated Integrations"
+                    value={outdatedTotal}
+                    color={(ov.outdatedHigh || 0) > 0 ? "#f87171" : outdatedTotal > 0 ? theme.yellow : theme.textMuted}
+                    sub={`${ov.outdatedHigh || 0} high · ${ov.outdatedMedium || 0} med · ${ov.outdatedLow || 0} low`}
+                  />
+                </div>
+
+                {/* Row 3: Charts */}
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  {/* Case Volume Trend */}
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "2 1 400px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Case Volume Trend (30d)</div>
+                    <div style={{ display: "flex", gap: 16, fontSize: 11, color: theme.textMuted, marginBottom: 12 }}>
+                      <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.accent, marginRight: 5 }} />Closed</span>
+                      <span><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: theme.purple, marginRight: 5 }} />Open</span>
+                    </div>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <AreaChart data={ov.caseTrends || []}>
+                        <defs>
+                          <linearGradient id="autoGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={theme.accent} stopOpacity={0.4} />
+                            <stop offset="95%" stopColor={theme.accent} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+                        <XAxis dataKey="day" tick={{ fill: theme.textMuted, fontSize: 10 }} interval="preserveStartEnd" />
+                        <YAxis tick={{ fill: theme.textMuted, fontSize: 11 }} />
+                        <Tooltip {...chartTooltipStyle} />
+                        <Area type="monotone" dataKey="closed" stroke={theme.accent} fill="url(#autoGrad)" strokeWidth={2} name="Closed" />
+                        <Area type="monotone" dataKey="open" stroke={theme.purple} fill="transparent" strokeWidth={2} strokeDasharray="5 5" name="Open" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* Maturity Score */}
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 200px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Maturity Score</div>
+                    <ScoreRing score={ov.maturityScore || 0} />
+                    <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 10, textAlign: "center" }}>
+                      {(ov.maturityScore || 0) >= 80 ? "Excellent" : (ov.maturityScore || 0) >= 60 ? "Good — room to improve" : "Needs attention"}
+                    </div>
+                    <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 8, textAlign: "center", lineHeight: 1.5 }}>
+                      Close rate · Playbook coverage<br />Integration freshness · Connector health · MTTR
+                    </div>
                   </div>
                 </div>
-              </div>
-            </>
-          )
+
+                {/* Row 4: Severity & Status breakdowns */}
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Severity Breakdown (30d)</div>
+                    {sevData.map(({ name, value }) => (
+                      <div key={name} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                        <span style={{ flex: 1, fontSize: 13 }}>{name}</span>
+                        <span style={{ fontWeight: 700, minWidth: 50, textAlign: "right" }}>{value.toLocaleString()}</span>
+                        <div style={{ width: 100, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
+                          <div style={{
+                            height: "100%", borderRadius: 3,
+                            width: `${Math.min((value / Math.max(...sevData.map(s => s.value), 1)) * 100, 100)}%`,
+                            background: name === "Critical" ? theme.red : name === "High" ? "#fb923c" : name === "Medium" ? theme.yellow : theme.textMuted,
+                          }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Status Distribution (30d)</div>
+                    {Object.entries(statusBd).map(([st, count]) => (
+                      <div key={st} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                        <span style={{ flex: 1, fontSize: 13, color: theme.textDim }}>{st.replace(/_/g, " ")}</span>
+                        <span style={{ fontWeight: 700 }}>{count.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            );
+          })()
         )}
 
         {/* PLAYBOOKS */}
         {tab === "playbooks" && (
+          loading.playbooks ? <TabLoading label="playbooks" /> :
           errors.playbooks ? <ErrorState message={errors.playbooks} onRetry={() => fetchData("playbooks", api.playbooks)} /> : (
             <DataTable
               columns={pbCols}
               rows={pbRows}
-              searchKeys={["name", "category"]}
+              searchKeys={["name", "category", "_integrations"]}
               filters={[
                 { key: "status", label: "Status", values: ["All", "Active", "Disabled"] },
                 { key: "playbookType", label: "Type", values: ["All", "Playbook", "Block"] },
@@ -784,46 +840,131 @@ export default function App() {
 
         {/* CASES */}
         {tab === "cases" && (
-          errors.cases ? <ErrorState message={errors.cases} onRetry={() => fetchData("cases", () => api.cases(30))} /> : (
-            <>
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-                <StatCard icon={FileSearch} label="Total Cases" value={(data.cases?.total_cases || 0).toLocaleString()} sub="Last 30 days" />
-                <StatCard icon={Clock} label="Avg MTTR" value={`${data.cases?.avg_mttr_hours || 0}h`} color={theme.accent} />
-              </div>
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
-                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Severity Breakdown</div>
-                  {Object.entries(data.cases?.severity_breakdown || {}).map(([sev, count]) => (
-                    <div key={sev} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-                      <SeverityDot severity={sev} />
-                      <span style={{ flex: 1, fontSize: 13 }}>{sev}</span>
-                      <span style={{ fontWeight: 700, minWidth: 40, textAlign: "right" }}>{count}</span>
-                      <div style={{ width: 100, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
-                        <div style={{
-                          height: "100%", borderRadius: 3,
-                          width: `${Math.min((count / Math.max(...Object.values(data.cases?.severity_breakdown || { x: 1 }))) * 100, 100)}%`,
-                          background: sev === "CRITICAL" ? theme.red : sev === "HIGH" ? "#fb923c" : sev === "MEDIUM" ? theme.yellow : theme.textMuted,
-                        }} />
+          loading.cases ? <TabLoading label="cases" /> :
+          errors.cases ? <ErrorState message={errors.cases} onRetry={() => fetchData("cases", () => api.cases(30))} /> :
+          (() => {
+            const cd = data.cases || {};
+            const total = cd.total_cases || 0;
+            const statusBd = cd.status_breakdown || {};
+            const sevBd = cd.severity_breakdown || {};
+            const openCount = (statusBd["Opened"] || 0) + (statusBd["IN_PROGRESS"] || 0);
+            const closedCount = total - openCount;
+            const closeRate = total > 0 ? Math.round(closedCount / total * 100) : 0;
+            const critHigh = (sevBd["PriorityCritical"] || 0) + (sevBd["PriorityHigh"] || 0);
+
+            const avgClose = cd.avg_mttr_hours || 0;
+            const mttrDisplay = avgClose >= 24 ? `${Math.round(avgClose / 24)}d` : `${Math.round(avgClose)}h`;
+            const closedWithTime = cd.closed_with_time || 0;
+
+            // Daily volume, assignees, and playbooks from backend (computed over ALL cases)
+            const dailyTrend = (cd.daily_volume || []).map(d => ({ day: d.day.slice(5), count: d.count }));
+            const topAssignees = (cd.top_assignees || []).map(a => [a.name, a.count]);
+            const playbookBreakdown = cd.playbook_breakdown || [];
+
+            return (
+              <>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard icon={FileSearch} label="Total Cases" value={total.toLocaleString()} sub="Last 30 days" />
+                  <StatCard icon={XCircle} label="Open" value={openCount.toLocaleString()} color={theme.yellow} sub="Awaiting resolution" />
+                  <StatCard icon={CheckCircle} label="Close Rate" value={`${closeRate}%`} color={theme.green} glow={theme.greenDim} sub={`${closedCount} of ${total} closed`} />
+                  <StatCard icon={AlertTriangle} label="Critical / High" value={critHigh} color={critHigh > 0 ? "#f87171" : theme.textMuted} sub={`${sevBd["PriorityCritical"] || 0} crit · ${sevBd["PriorityHigh"] || 0} high`} />
+                  <StatCard icon={Clock} label="Avg Time to Close" value={mttrDisplay} color={theme.accent} sub={`From ${closedWithTime} closed cases`} />
+                </div>
+
+                {/* Charts row */}
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                  {/* Daily case volume */}
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "2 1 400px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Daily Case Volume</div>
+                    <ResponsiveContainer width="100%" height={180}>
+                      <AreaChart data={dailyTrend}>
+                        <defs>
+                          <linearGradient id="caseGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={theme.accent} stopOpacity={0.4} />
+                            <stop offset="95%" stopColor={theme.accent} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={theme.border} />
+                        <XAxis dataKey="day" tick={{ fill: theme.textMuted, fontSize: 10 }} interval="preserveStartEnd" />
+                        <YAxis tick={{ fill: theme.textMuted, fontSize: 10 }} />
+                        <Tooltip {...chartTooltipStyle} />
+                        <Area type="monotone" dataKey="count" stroke={theme.accent} fill="url(#caseGrad)" strokeWidth={2} name="Cases" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* Top Assignees */}
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 280px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Top Assignees</div>
+                    {topAssignees.map(([name, count], idx) => (
+                      <div key={name} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                        <span style={{ fontSize: 11, color: theme.textMuted, minWidth: 16, textAlign: "right" }}>{idx + 1}.</span>
+                        <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={name}>{name}</span>
+                        <span style={{ fontWeight: 700, fontSize: 13, minWidth: 30, textAlign: "right" }}>{count}</span>
+                        <div style={{ width: 60, height: 5, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
+                          <div style={{ height: "100%", borderRadius: 3, background: theme.accent, width: `${(count / topAssignees[0][1]) * 100}%` }} />
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-                <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
-                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Status Distribution</div>
-                  {Object.entries(data.cases?.status_breakdown || {}).map(([st, count]) => (
-                    <div key={st} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-                      <span style={{ flex: 1, fontSize: 13, color: theme.textDim }}>{st.replace(/_/g, " ")}</span>
-                      <span style={{ fontWeight: 700 }}>{count}</span>
+
+                {/* Playbook Breakdown */}
+                {playbookBreakdown.length > 0 && (
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+                    <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 400px" }}>
+                      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Cases by Playbook</div>
+                      <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 14 }}>Last 30 days — {total.toLocaleString()} cases</div>
+                      <ResponsiveContainer width="100%" height={Math.max(160, playbookBreakdown.length * 32)}>
+                        <BarChart data={playbookBreakdown} layout="vertical" margin={{ left: 10, right: 20 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={theme.border} horizontal={false} />
+                          <XAxis type="number" tick={{ fill: theme.textMuted, fontSize: 10 }} />
+                          <YAxis type="category" dataKey="name" width={220} tick={{ fill: theme.textDim, fontSize: 11 }} />
+                          <Tooltip {...chartTooltipStyle} />
+                          <Bar dataKey="count" fill={theme.accent} radius={[0, 4, 4, 0]} name="Cases" />
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
-                  ))}
+                  </div>
+                )}
+
+                {/* Severity & Status row */}
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Severity Breakdown</div>
+                    {Object.entries(sevBd).map(([sev, count]) => (
+                      <div key={sev} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                        <SeverityDot severity={sev} />
+                        <span style={{ flex: 1, fontSize: 13 }}>{sev}</span>
+                        <span style={{ fontWeight: 700, minWidth: 40, textAlign: "right" }}>{count}</span>
+                        <div style={{ width: 100, height: 6, background: theme.border, borderRadius: 3, overflow: "hidden" }}>
+                          <div style={{
+                            height: "100%", borderRadius: 3,
+                            width: `${Math.min((count / Math.max(...Object.values(sevBd))) * 100, 100)}%`,
+                            background: sev.includes("Critical") ? theme.red : sev.includes("High") ? "#fb923c" : sev.includes("Medium") ? theme.yellow : theme.textMuted,
+                          }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: theme.bgCard, borderRadius: 14, padding: 22, border: `1px solid ${theme.border}`, flex: "1 1 300px" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Status Distribution</div>
+                    {Object.entries(statusBd).map(([st, count]) => (
+                      <div key={st} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                        <span style={{ flex: 1, fontSize: 13, color: theme.textDim }}>{st.replace(/_/g, " ")}</span>
+                        <span style={{ fontWeight: 700 }}>{count}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </>
-          )
+              </>
+            );
+          })()
         )}
 
         {/* CONNECTORS */}
         {tab === "connectors" && (
+          loading.connectors ? <TabLoading label="connectors" /> :
           errors.connectors ? <ErrorState message={errors.connectors} onRetry={() => fetchData("connectors", api.connectors)} /> : (
             <DataTable
               columns={connCols}
@@ -833,8 +974,8 @@ export default function App() {
               statsBar={
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Plug} label="Total Connectors" value={data.connectors?.total || 0} />
-                  <StatCard icon={CheckCircle} label="Integrations" value={Object.keys(data.connectors?.connectors || {}).length} color={theme.green} />
                   <StatCard icon={CheckCircle} label="Enabled" value={connRows.filter(c => c.isEnabled).length} color={theme.green} />
+                  <StatCard icon={Activity} label="Receiving Alerts" value={connRows.filter(c => (c.alertsLastDay || 0) > 0).length} color={theme.accent} sub="Past 24 hours" />
                 </div>
               }
               emptyMsg="No connectors found."
@@ -844,6 +985,7 @@ export default function App() {
 
         {/* WEBHOOKS */}
         {tab === "webhooks" && (
+          loading.webhooks ? <TabLoading label="webhooks" /> :
           errors.webhooks ? <ErrorState message={errors.webhooks} onRetry={() => fetchData("webhooks", api.webhooks)} /> : (
             <DataTable
               columns={whCols}
@@ -854,6 +996,7 @@ export default function App() {
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
                   <StatCard icon={Webhook} label="Total Webhooks" value={data.webhooks?.total || 0} />
                   <StatCard icon={CheckCircle} label="Enabled" value={whRows.filter(w => w.isEnabled).length} color={theme.green} />
+                  <StatCard icon={Activity} label="Receiving Alerts" value={whRows.filter(w => (w.alertsLastDay || 0) > 0).length} color={theme.accent} sub="Past 24 hours" />
                 </div>
               }
               emptyMsg="No webhooks found."
@@ -863,6 +1006,7 @@ export default function App() {
 
         {/* ENVIRONMENTS */}
         {tab === "environments" && (
+          loading.environments ? <TabLoading label="environments" /> :
           errors.environments ? <ErrorState message={errors.environments} onRetry={() => fetchData("environments", api.environments)} /> : (
             <>
               <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
@@ -879,6 +1023,7 @@ export default function App() {
 
         {/* AGENTS */}
         {tab === "agents" && (
+          loading.agents ? <TabLoading label="agents" /> :
           errors.agents ? <ErrorState message={errors.agents} onRetry={() => fetchData("agents", api.agents)} /> : (
             <DataTable
               columns={agentCols}
@@ -899,6 +1044,7 @@ export default function App() {
 
         {/* USERS */}
         {tab === "users" && (
+          loading.users ? <TabLoading label="users" /> :
           errors.users ? <ErrorState message={errors.users} onRetry={() => fetchData("users", api.users)} /> : (
             <DataTable
               columns={userCols}
@@ -919,6 +1065,7 @@ export default function App() {
 
         {/* INTEGRATION INSTANCES */}
         {tab === "instances" && (
+          loading.instances ? <TabLoading label="instances" /> :
           errors.instances ? <ErrorState message={errors.instances} onRetry={() => fetchData("instances", api.instances)} /> : (
             <DataTable
               columns={instCols}
@@ -938,6 +1085,7 @@ export default function App() {
 
         {/* JOBS */}
         {tab === "jobs" && (
+          loading.jobs ? <TabLoading label="jobs" /> :
           errors.jobs ? <ErrorState message={errors.jobs} onRetry={() => fetchData("jobs", api.jobs)} /> : (
             <DataTable
               columns={jobCols}
@@ -961,6 +1109,7 @@ export default function App() {
 
         {/* IDE */}
         {tab === "ide" && (
+          loading.ide ? <TabLoading label="integrations" /> :
           errors.ide ? <ErrorState message={errors.ide} onRetry={() => fetchData("ide", api.ide)} /> : (
             <DataTable
               columns={ideCols}
@@ -968,7 +1117,7 @@ export default function App() {
               searchKeys={["name"]}
               filters={[
                 { key: "isCustom", label: "Custom", values: ["All", "true", "false"] },
-                { key: "versionRisk", label: "Risk", values: ["All", "high", "medium", "low", "ok", "unknown"] },
+                { key: "versionRisk", label: "Risk", values: ["All", "high", "medium", "low", "ok"] },
               ]}
               statsBar={
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
@@ -976,6 +1125,7 @@ export default function App() {
                   <StatCard icon={Zap} label="Custom" value={ideRows.filter(i => i.isCustom).length} color={theme.purple} />
                   <StatCard icon={AlertTriangle} label="High Risk" value={ideRows.filter(i => i.versionRisk === "high").length} color="#f87171" />
                   <StatCard icon={AlertTriangle} label="Medium Risk" value={ideRows.filter(i => i.versionRisk === "medium").length} color={theme.yellow} />
+                  <StatCard icon={AlertTriangle} label="Low Risk" value={ideRows.filter(i => i.versionRisk === "low").length} color={theme.green} />
                 </div>
               }
               emptyMsg="No integrations match your filters."
@@ -985,6 +1135,7 @@ export default function App() {
 
         {/* FINDINGS */}
         {tab === "findings" && (
+          loading.findings ? <TabLoading label="findings" /> :
           errors.findings ? <ErrorState message={errors.findings} onRetry={() => fetchData("findings", api.findings)} /> : (
             <>
               <p style={{ fontSize: 13, color: theme.textMuted, marginTop: 0, marginBottom: 18 }}>

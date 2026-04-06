@@ -10,7 +10,6 @@ A full-stack dashboard for evaluating a client's Google Chronicle SOAR (Siemplif
 | Frontend | React 18, Vite, Recharts, Lucide Icons |
 | Proxy | Nginx (serves SPA + proxies `/api` to FastAPI) |
 | Orchestration | Docker Compose |
-| Cache | Redis (optional, reserved for future rate-limit handling) |
 
 ## Features
 
@@ -18,17 +17,17 @@ A full-stack dashboard for evaluating a client's Google Chronicle SOAR (Siemplif
 
 | Tab | Description |
 |---|---|
-| **Overview** | Summary stats (total playbooks, cases, avg MTTR, automation rate), case volume trend chart, maturity score ring |
+| **Overview** | Key metrics (playbooks, cases, close rate, MTTR, critical/high), infrastructure stats (connectors, webhooks, integrations, outdated versions), case volume trend chart, maturity score ring, severity and status breakdowns |
 | **Playbooks** | Full playbook inventory with integration tags, step counts, type, category, and last modified date |
 | **Cases** | 30-day case summary with severity and status breakdowns |
-| **Connectors** | All connector cards grouped by integration |
-| **Webhooks** | Webhook list with environment and enabled state |
+| **Connectors** | All connector cards grouped by integration, with alert counts (24h and 90d avg) |
+| **Webhooks** | Webhook list with environment, enabled state, and alert counts |
 | **Environments** | Environment names configured in the SOAR platform |
 | **Agents** | Agent list with live/failed status and environment assignments |
 | **Users** | User accounts with roles, provider, environments, and disabled state |
 | **Instances** | Integration instances with remote flag |
 | **Jobs** | Scheduled jobs with enabled and custom flags |
-| **IDE** | Integration definitions with custom flag and action list |
+| **IDE** | Integration definitions with installed/latest version, version risk badge, custom flag, and action list |
 | **Findings** | Automated assessment findings flagged from the environment scan |
 
 ### Table UX (all data tabs)
@@ -45,20 +44,26 @@ A full-stack dashboard for evaluating a client's Google Chronicle SOAR (Siemplif
 - **Global progress bar** — gradient bar fixed at the top of the viewport, fills as each of the 14 parallel API calls completes
 - **Refresh button** — re-fetches all data; spinner animates while any request is in flight
 - **Per-tab error states** with retry button
-- Auto-loads all data on mount — no login screen required
+- Auto-loads all data on mount
 
 ### Playbooks (detail)
 
 - Integration tags extracted from each playbook's steps via `GetWorkflowFullInfoByIdentifier`
 - Step count per playbook
 - Status sourced from `isEnabled` field in detail response
-- All 231+ playbook detail requests run fully concurrently (`asyncio.gather`)
+- All playbook detail requests run fully concurrently (`asyncio.gather`)
+
+### Runtime Credentials
+
+Credentials can be supplied either via `backend/.env` (loaded at startup) or at runtime via `POST /api/connect`. Runtime credentials override `.env` values and are cleared on `POST /api/disconnect`.
 
 ## API Endpoints (Backend)
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/health` | Health check |
+| GET | `/api/health` | Health check + connection status |
+| POST | `/api/connect` | Set runtime credentials |
+| POST | `/api/disconnect` | Clear runtime credentials |
 | GET | `/api/overview` | Aggregate summary stats |
 | GET | `/api/playbooks` | All playbooks with steps and integrations |
 | GET | `/api/cases` | Case list (last N days, filterable) |
@@ -71,7 +76,7 @@ A full-stack dashboard for evaluating a client's Google Chronicle SOAR (Siemplif
 | GET | `/api/users` | User accounts |
 | GET | `/api/integration-instances` | Integration instance list |
 | GET | `/api/jobs` | Scheduled job list |
-| GET | `/api/ide` | IDE integration definitions |
+| GET | `/api/ide` | IDE integration definitions with version info |
 | GET | `/api/findings` | Automated assessment findings |
 
 Interactive docs: `http://localhost:8000/docs`
@@ -94,6 +99,9 @@ CHRONICLE_SOAR_HOST=<tenant>.siemplify-soar.com
 CHRONICLE_PROJECT_ID=<project-id>
 CHRONICLE_REGION=<region>          # e.g. eu, us
 CHRONICLE_INSTANCE_ID=<instance-uuid>
+
+# Optional: path to a Google service account JSON key (alternative to bearer token)
+CHRONICLE_SA_FILE=
 
 # CORS origin for the frontend
 FRONTEND_URL=http://localhost:3000
@@ -169,7 +177,9 @@ Browser
                                     └── Chronicle SOAR API (external)
 ```
 
-All Chronicle API calls are made server-side from the FastAPI backend. The browser never contacts the SOAR host directly. Credentials stay in `backend/.env` and are never exposed to the frontend.
+All Chronicle API calls are made server-side from the FastAPI backend. The browser never contacts the SOAR host directly. Credentials stay in `backend/.env` (or runtime memory) and are never exposed to the frontend.
+
+The backend uses a shared async HTTP client with connection pooling and an in-memory response cache (5 min TTL) to minimise redundant API calls during a page load cycle.
 
 ## Security Notes
 

@@ -1,5 +1,5 @@
 # ── CodSec SOAR Evaluator — Docker Compose ──
-# Orchestrates backend (FastAPI) + frontend (React/Nginx) + Redis cache
+# Orchestrates backend (FastAPI) + frontend (React/Nginx)
 #
 # Usage:
 #   docker compose up -d            # Start all services
@@ -22,14 +22,10 @@ services:
       - ./backend/.env
     environment:
       - PYTHONUNBUFFERED=1
-      - REDIS_URL=redis://redis:6379/0
     volumes:
       # Mount service account key if using SA auth
       # - ./backend/service-account.json:/app/service-account.json:ro
       - backend-logs:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
     networks:
       - codsec-net
     healthcheck:
@@ -74,32 +70,6 @@ services:
         reservations:
           cpus: "0.1"
           memory: 64M
-
-  # ── Redis Cache (optional but recommended) ──
-  redis:
-    image: redis:7-alpine
-    container_name: codsec-redis
-    restart: unless-stopped
-    command: >
-      redis-server
-      --maxmemory 64mb
-      --maxmemory-policy allkeys-lru
-      --save ""
-      --appendonly no
-    ports:
-      - "6379:6379"
-    networks:
-      - codsec-net
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 96M
 
   # ── Watchtower (auto-update containers) — optional ──
   # Uncomment to enable automatic image updates
